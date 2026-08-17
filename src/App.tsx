@@ -1,4 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
+import {
+  CONTRACTS,
+  MONAD,
+  explorerAddressUrl,
+  formatCompact,
+  formatUnits,
+  shortenAddress,
+} from './chain.ts';
+import { useWallet } from './useWallet.ts';
+import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from './useProtocol.ts';
 
 type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'wallet';
 type SectionId = 'overview' | 'identity' | 'staking' | 'pulse';
@@ -24,6 +34,22 @@ type Activity = {
   icon: IconName;
 };
 
+/** Placeholder for a value the chain has not returned (yet, or at all). */
+const PENDING = '—';
+
+function tokenAmount(value: bigint | null, decimals: number, precision = 2): string {
+  return value === null ? PENDING : formatUnits(value, decimals, precision);
+}
+
+function compactAmount(value: bigint | null, decimals: number): string {
+  return value === null ? PENDING : formatCompact(value, decimals);
+}
+
+function gweiFromWei(value: bigint | null): string {
+  if (value === null) return PENDING;
+  return `${formatUnits(value, 9, 2)} gwei`;
+}
+
 const navLinks: Array<{ label: string; href: `#${SectionId}`; id: SectionId }> = [
   { label: 'Overview', href: '#overview', id: 'overview' },
   { label: 'Identity', href: '#identity', id: 'identity' },
@@ -31,58 +57,164 @@ const navLinks: Array<{ label: string; href: `#${SectionId}`; id: SectionId }> =
   { label: 'Pulse', href: '#pulse', id: 'pulse' },
 ];
 
-const features: Feature[] = [
-  {
-    id: 'identity',
-    number: '01',
-    eyebrow: 'Identity NFT',
-    title: 'Own the signal.',
-    description:
-      'A living identity primitive for the people, protocols, and places you return to onchain.',
-    statLabel: 'Identities minted',
-    statValue: '12,482',
-    icon: 'diamond',
-    theme: 'light',
-    details: ['Soulbound by choice', 'Composable profile layer'],
-  },
-  {
-    id: 'staking',
-    number: '02',
-    eyebrow: 'Staking engine',
-    title: 'Make time compound.',
-    description:
-      'Turn conviction into a position. Stake SER9, collect protocol rewards, and keep moving.',
-    statLabel: 'Current APR',
-    statValue: '18.42%',
-    icon: 'bolt',
-    theme: 'sand',
-    details: ['Flexible lock periods', 'Rewards stream daily'],
-  },
-  {
-    id: 'wallet',
-    number: '03',
-    eyebrow: 'Smart wallet',
-    title: 'Pay as yourself.',
-    description:
-      'A smart wallet that keeps permissions simple and your identity close to every action.',
-    statLabel: 'Wallets activated',
-    statValue: '3,106',
-    icon: 'wallet',
-    theme: 'dark',
-    details: ['One-tap approvals', 'Built for Monad speed'],
-  },
-];
+function buildFeatures(stats: ProtocolStats): Feature[] {
+  const symbol = stats.ser9Symbol ?? 'SER9';
 
-const activity: Activity[] = [
-  { type: 'Identity minted', detail: 'SER9 ID #0143', amount: '+ 1 identity', time: '02:14 ago', icon: 'diamond' },
-  { type: 'Stake position', detail: 'Position #0089', amount: '4,280 SER9', time: '08:42 ago', icon: 'bolt' },
-  { type: 'Reward claimed', detail: 'Epoch 084 / Monad', amount: '+ 126.40 SER9', time: '16:09 ago', icon: 'check' },
-  { type: 'Wallet activated', detail: 'Smart wallet #319', amount: '0x7A...91D2', time: '24:33 ago', icon: 'wallet' },
-  { type: 'Protocol vote', detail: 'Proposal 004 / fee split', amount: 'Voted yes', time: '41:17 ago', icon: 'cubes' },
-  { type: 'SER9 transfer', detail: 'Identity #811 → #143', amount: '680 SER9', time: '58:02 ago', icon: 'arrow' },
-];
+  return [
+    {
+      id: 'identity',
+      number: '01',
+      eyebrow: 'Identity NFT',
+      title: 'Own the signal.',
+      description:
+        'A living identity primitive for the people, protocols, and places you return to onchain.',
+      statLabel: 'Identities minted',
+      statValue: stats.identityCount === null ? PENDING : stats.identityCount.toLocaleString('en-US'),
+      icon: 'diamond',
+      theme: 'light',
+      details: [
+        `Human mint fee ${tokenAmount(stats.humanMintFee, stats.ser9Decimals, 0)} ${symbol}`,
+        `AI mint fee ${tokenAmount(stats.aiMintFee, stats.ser9Decimals, 0)} ${symbol}`,
+      ],
+    },
+    {
+      id: 'staking',
+      number: '02',
+      eyebrow: 'Staking engine',
+      title: 'Make time compound.',
+      description:
+        'Turn conviction into a position. Stake SER9, collect protocol rewards, and keep moving.',
+      statLabel: `Total staked (${symbol})`,
+      statValue: compactAmount(stats.totalStaked, stats.ser9Decimals),
+      icon: 'bolt',
+      theme: 'sand',
+      details: [
+        `Reward index ${tokenAmount(stats.rewardPerTokenStored, stats.ser9Decimals, 2)}`,
+        'Rewards accrue per block',
+      ],
+    },
+    {
+      id: 'wallet',
+      number: '03',
+      eyebrow: 'Smart wallet',
+      title: 'Pay as yourself.',
+      description:
+        'A smart wallet that keeps permissions simple and your identity close to every action.',
+      statLabel: 'Wallets deployed',
+      statValue: stats.walletCount === null ? PENDING : stats.walletCount.toLocaleString('en-US'),
+      icon: 'wallet',
+      theme: 'dark',
+      details: ['Deterministic CREATE2 address', 'Built for Monad speed'],
+    },
+  ];
+}
 
-const chartValues = [28, 38, 34, 46, 44, 61, 56, 72, 68, 79, 76, 91];
+/** Live protocol readings, rendered in the slot the mock activity feed used. */
+function buildActivity(stats: ProtocolStats, account: AccountStats, connected: boolean): Activity[] {
+  const symbol = stats.ser9Symbol ?? 'SER9';
+
+  const rows: Activity[] = [
+    {
+      type: 'Latest block',
+      detail: MONAD.name,
+      amount: stats.blockNumber === null ? PENDING : `#${stats.blockNumber.toLocaleString('en-US')}`,
+      time: gweiFromWei(stats.gasPriceWei),
+      icon: 'cubes',
+    },
+    {
+      type: 'Total staked',
+      detail: `${symbol} in staking contract`,
+      amount: `${compactAmount(stats.totalStaked, stats.ser9Decimals)} ${symbol}`,
+      time: shortenAddress(CONTRACTS.staking),
+      icon: 'bolt',
+    },
+    {
+      type: 'Identities minted',
+      detail: 'Series9Identity / S9ID',
+      amount: stats.identityCount === null ? PENDING : `${stats.identityCount} minted`,
+      time: shortenAddress(CONTRACTS.identity),
+      icon: 'diamond',
+    },
+    {
+      type: `${symbol} supply`,
+      detail: 'ERC-20 totalSupply',
+      amount: `${compactAmount(stats.ser9TotalSupply, stats.ser9Decimals)} ${symbol}`,
+      time: shortenAddress(CONTRACTS.ser9),
+      icon: 'cubes',
+    },
+    {
+      type: 'Reputation weight',
+      detail: 'Total across all identities',
+      amount:
+        stats.totalReputationScore === null ? PENDING : stats.totalReputationScore.toLocaleString('en-US'),
+      time: 'reward split basis',
+      icon: 'check',
+    },
+  ];
+
+  if (connected) {
+    rows.push(
+      {
+        type: `Your ${symbol} balance`,
+        detail: 'Connected wallet',
+        amount: `${tokenAmount(account.ser9Balance, stats.ser9Decimals)} ${symbol}`,
+        time: 'live',
+        icon: 'wallet',
+      },
+      {
+        type: 'Your staked position',
+        detail: 'Series9 staking',
+        amount: `${tokenAmount(account.staked, stats.ser9Decimals)} ${symbol}`,
+        time: `pending ${tokenAmount(account.pendingRewards, stats.ser9Decimals)}`,
+        icon: 'bolt',
+      },
+    );
+  }
+
+  return rows;
+}
+
+/** Gas used per sampled block, normalized to 0–100 for the bar strip. */
+function normalizeSeries(series: number[]): number[] {
+  const peak = Math.max(...series, 1);
+  return series.map((value) => Math.max(4, Math.round((value / peak) * 100)));
+}
+
+const CHART_WIDTH = 720;
+const CHART_HEIGHT = 260;
+const CHART_TOP_PADDING = 24;
+
+/** Maps a 0–100 series onto the pulse chart's viewBox, returning line + area paths. */
+function buildChartPaths(series: number[]): { line: string; area: string; lastX: number; lastY: number } {
+  if (series.length < 2) {
+    const flatY = CHART_HEIGHT / 2;
+    return {
+      line: `M0 ${flatY} L${CHART_WIDTH} ${flatY}`,
+      area: `M0 ${flatY} L${CHART_WIDTH} ${flatY} V${CHART_HEIGHT} H0Z`,
+      lastX: CHART_WIDTH,
+      lastY: flatY,
+    };
+  }
+
+  const usableHeight = CHART_HEIGHT - CHART_TOP_PADDING * 2;
+  const points = series.map((value, index) => {
+    const x = (index / (series.length - 1)) * CHART_WIDTH;
+    const y = CHART_HEIGHT - CHART_TOP_PADDING - (value / 100) * usableHeight;
+    return `${Math.round(x)} ${Math.round(y)}`;
+  });
+
+  const line = `M${points.join(' L')}`;
+  const [lastX, lastY] = points[points.length - 1].split(' ').map(Number);
+
+  return { line, area: `${line} V${CHART_HEIGHT} H0Z`, lastX, lastY };
+}
+
+/** Percent change between the first and last sample. */
+function seriesDelta(series: number[]): string {
+  if (series.length < 2 || series[0] === 0) return PENDING;
+  const change = ((series[series.length - 1] - series[0]) / series[0]) * 100;
+  return `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`;
+}
 
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const commonProps = {
@@ -216,12 +348,22 @@ function FeatureCard({ feature }: { feature: Feature }) {
 
 function App() {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [connected, setConnected] = useState(false);
   const [showAllActivity, setShowAllActivity] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SectionId>('overview');
   const menuToggleRef = useRef<HTMLButtonElement>(null);
   const navRef = useRef<HTMLElement>(null);
+
+  const wallet = useWallet();
+  const stats = useProtocol();
+  const account = useAccount(wallet.address, stats.blockNumber);
+
+  const connected = wallet.address !== null;
+  const symbol = stats.ser9Symbol ?? 'SER9';
+  const features = buildFeatures(stats);
+  const activity = buildActivity(stats, account, connected);
+  const chartValues = normalizeSeries(stats.gasSeries);
+  const chart = buildChartPaths(chartValues);
 
   useEffect(() => {
     const sectionIds: SectionId[] = ['overview', 'identity', 'staking', 'pulse'];
@@ -281,10 +423,25 @@ function App() {
     }
   }
 
-  function handleConnectWallet() {
-    const nextConnectedState = !connected;
-    setConnected(nextConnectedState);
-    announce(nextConnectedState ? 'Wallet connected. Identity #0143 is ready.' : 'Wallet disconnected from this mock session.');
+  async function handleConnectWallet() {
+    if (connected) {
+      wallet.disconnect();
+      announce('Wallet disconnected from this site. Revoke access in your wallet to fully remove it.');
+      return;
+    }
+
+    const result = await wallet.connect();
+    announce(
+      result.error ?? `Connected ${result.address ? shortenAddress(result.address) : 'wallet'} on ${MONAD.name}.`,
+    );
+  }
+
+  async function handleSwitchNetwork() {
+    try {
+      await wallet.switchToMonad();
+    } catch {
+      announce(`Could not switch networks. Select ${MONAD.name} in your wallet.`);
+    }
   }
 
   return (
@@ -311,19 +468,44 @@ function App() {
           </nav>
 
           <div className="site-header__actions">
-            <button className="network-status" type="button" onClick={() => announce('Monad mainnet is live at block 143.') }>
+            <button
+              className="network-status"
+              type="button"
+              onClick={() =>
+                announce(
+                  stats.error
+                    ? `Monad RPC unreachable: ${stats.error}`
+                    : `${MONAD.name} (chain ${MONAD.id}) at block ${stats.blockNumber?.toLocaleString('en-US') ?? PENDING}.`,
+                )
+              }
+            >
               <span className="network-status__dot" />
               <span>Monad</span>
-              <span className="network-status__number">143</span>
+              <span className="network-status__number">
+                {stats.blockNumber === null ? MONAD.id : Number(stats.blockNumber % 100000n).toLocaleString('en-US')}
+              </span>
             </button>
+            {connected && !wallet.onMonad && (
+              <button className="wallet-button wallet-button--warning" type="button" onClick={handleSwitchNetwork}>
+                <Icon name="bolt" size={16} />
+                <span>Switch to Monad</span>
+              </button>
+            )}
             <button
               className={`wallet-button${connected ? ' is-connected' : ''}`}
               type="button"
               aria-pressed={connected}
-              onClick={handleConnectWallet}
+              disabled={wallet.connecting}
+              onClick={() => void handleConnectWallet()}
             >
               <Icon name={connected ? 'check' : 'wallet'} size={16} />
-              <span>{connected ? '0x7A...91D2' : 'Connect wallet'}</span>
+              <span>
+                {wallet.connecting
+                  ? 'Connecting…'
+                  : connected && wallet.address
+                    ? shortenAddress(wallet.address)
+                    : 'Connect wallet'}
+              </span>
             </button>
             <button
               ref={menuToggleRef}
@@ -345,23 +527,40 @@ function App() {
           <div className="hero__grid-overlay" aria-hidden="true" />
           <div className="container hero__inner">
             <div className="hero__copy">
-              <p className="eyebrow eyebrow--gold"><span className="eyebrow__line" />MONAD MAINNET <span>/</span> 143</p>
+              <p className="eyebrow eyebrow--gold">
+                <span className="eyebrow__line" />MONAD MAINNET <span>/</span>{' '}
+                {stats.blockNumber === null ? MONAD.id : `BLOCK ${stats.blockNumber.toLocaleString('en-US')}`}
+              </p>
               <h1 id="hero-title">Your identity,<br /><em>in motion<span className="hero__outline-nine">9</span>.</em></h1>
               <p className="hero__lede">
                 SERIES9 is the identity layer for a more personal onchain economy. Move with conviction, keep your signal.
               </p>
               <div className="hero__actions">
-                <a className="button button--gold" href="#pulse" onClick={() => announce('App surface ready. Explore the live protocol pulse below.') }>
-                  Launch app <ButtonArrow />
-                </a>
-                <a className="button button--outline" href="#architecture" onClick={() => announce('Protocol architecture opened.') }>
-                  Explore protocol <ButtonArrow />
+                {connected ? (
+                  <a className="button button--gold" href="#pulse">
+                    View live pulse <ButtonArrow />
+                  </a>
+                ) : (
+                  <button className="button button--gold" type="button" disabled={wallet.connecting} onClick={() => void handleConnectWallet()}>
+                    {wallet.connecting ? 'Connecting…' : 'Connect wallet'} <ButtonArrow />
+                  </button>
+                )}
+                <a
+                  className="button button--outline"
+                  href={explorerAddressUrl(CONTRACTS.identity)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View contract <ButtonArrow />
                 </a>
               </div>
               <div className="hero__meta">
-                <span><span className="meta-check"><Icon name="check" size={13} /></span> Mainnet ready</span>
+                <span>
+                  <span className="meta-check"><Icon name="check" size={13} /></span>{' '}
+                  {stats.error ? 'RPC unreachable' : stats.loading ? 'Reading mainnet…' : 'Live on mainnet'}
+                </span>
                 <span className="hero__meta-divider" />
-                <span>Built for Monad</span>
+                <span>Chain {MONAD.id} / gas {gweiFromWei(stats.gasPriceWei)}</span>
               </div>
             </div>
 
@@ -377,7 +576,10 @@ function App() {
                 <div className="identity-card__texture" aria-hidden="true" />
                 <div className="identity-card__header">
                   <span>SER9 IDENTITY</span>
-                  <span className="identity-card__signal"><span /> AUTHENTIC</span>
+                  <span className="identity-card__signal">
+                    <span />{' '}
+                    {account.tokenId === null ? (connected ? 'NO IDENTITY' : 'NOT CONNECTED') : account.verified ? 'VERIFIED' : 'AUTHENTIC'}
+                  </span>
                 </div>
                 <div className="identity-card__monogram">
                   <span className="monogram-ring monogram-ring--back" aria-hidden="true" />
@@ -386,24 +588,45 @@ function App() {
                 </div>
                 <div className="identity-card__name">
                   <span className="identity-card__label">ONCHAIN HANDLE</span>
-                  <strong>orbit / 0143</strong>
+                  <strong>
+                    {account.tokenId === null
+                      ? connected
+                        ? 'unclaimed'
+                        : 'connect wallet'
+                      : `${account.handle || 'unnamed'} / ${account.tokenId.toString().padStart(4, '0')}`}
+                  </strong>
                 </div>
                 <div className="identity-card__footer">
-                  <span>ISSUED 2025</span>
+                  <span>{connected && wallet.address ? shortenAddress(wallet.address) : 'NO WALLET'}</span>
                   <span>MONAD MAINNET</span>
-                  <span className="identity-card__code">S9—0143</span>
+                  <span className="identity-card__code">
+                    {account.tokenId === null ? 'S9—————' : `S9—${account.tokenId.toString().padStart(4, '0')}`}
+                  </span>
                 </div>
               </div>
               <div className="identity-float identity-float--top">
-                <span className="identity-float__label">SER9 BALANCE</span>
-                <strong>8,901.42</strong>
-                <span className="identity-float__change">+ 12.8%</span>
+                <span className="identity-float__label">{symbol} BALANCE</span>
+                <strong>{connected ? tokenAmount(account.ser9Balance, stats.ser9Decimals) : PENDING}</strong>
+                <span className="identity-float__change">
+                  {connected ? `${tokenAmount(account.monBalance, MONAD.nativeCurrency.decimals)} MON` : 'not connected'}
+                </span>
               </div>
               <div className="identity-float identity-float--bottom">
                 <span className="identity-float__icon"><Icon name="lock" size={14} /></span>
-                <span><strong>Identity secured</strong><small>Block 18,420,991</small></span>
+                <span>
+                  <strong>{account.smartWallet ? 'Smart wallet live' : 'Identity layer live'}</strong>
+                  <small>
+                    {account.smartWallet
+                      ? shortenAddress(account.smartWallet)
+                      : `Block ${stats.blockNumber?.toLocaleString('en-US') ?? PENDING}`}
+                  </small>
+                </span>
               </div>
-              <figcaption id="identity-visual-caption">A portable identity, anchored to your motion.</figcaption>
+              <figcaption id="identity-visual-caption">
+                {account.tokenId === null
+                  ? 'A portable identity, anchored to your motion.'
+                  : `Identity #${account.tokenId} read live from Series9Identity on Monad.`}
+              </figcaption>
             </figure>
           </div>
           <div className="hero__footer-line container"><span>scroll to enter</span><span className="hero__footer-arrow" aria-hidden="true">↓</span><span>09—∞</span></div>
@@ -412,10 +635,26 @@ function App() {
         <section className="signal-strip" aria-label="Live protocol signals">
           <div className="container signal-strip__grid">
             <div className="signal-strip__intro"><span className="signal-strip__pulse" /> LIVE SIGNAL</div>
-            <div className="signal-metric"><span>SER9 / PRICE</span><strong>$0.0842</strong><small>+8.91%</small></div>
-            <div className="signal-metric"><span>TOTAL STAKED</span><strong>18.42M</strong><small>SER9</small></div>
-            <div className="signal-metric"><span>IDENTITIES</span><strong>12,482</strong><small>+143 today</small></div>
-            <div className="signal-metric signal-metric--status"><span>NETWORK STATUS</span><strong><i /> Operational</strong><small>Monad mainnet</small></div>
+            <div className="signal-metric">
+              <span>{symbol} / SUPPLY</span>
+              <strong>{compactAmount(stats.ser9TotalSupply, stats.ser9Decimals)}</strong>
+              <small>{symbol}</small>
+            </div>
+            <div className="signal-metric">
+              <span>TOTAL STAKED</span>
+              <strong>{compactAmount(stats.totalStaked, stats.ser9Decimals)}</strong>
+              <small>{symbol}</small>
+            </div>
+            <div className="signal-metric">
+              <span>IDENTITIES</span>
+              <strong>{stats.identityCount === null ? PENDING : stats.identityCount.toLocaleString('en-US')}</strong>
+              <small>minted</small>
+            </div>
+            <div className="signal-metric signal-metric--status">
+              <span>NETWORK STATUS</span>
+              <strong><i /> {stats.error ? 'Degraded' : stats.loading ? 'Connecting' : 'Operational'}</strong>
+              <small>{stats.error ? 'RPC unreachable' : `Block ${stats.blockNumber?.toLocaleString('en-US') ?? PENDING}`}</small>
+            </div>
           </div>
         </section>
 
@@ -491,10 +730,19 @@ function App() {
 
             <div className="pulse-layout">
               <div className="chart-panel">
-                <div className="chart-panel__topline"><div><span className="panel-kicker">SER9 ACTIVITY</span><strong>+28.4%</strong><small>last 24 hours</small></div><span className="chart-panel__period">24H <i>7D</i> 30D</span></div>
+                <div className="chart-panel__topline">
+                  <div>
+                    <span className="panel-kicker">MONAD THROUGHPUT</span>
+                    <strong>{seriesDelta(chartValues)}</strong>
+                    <small>gas used across the last 550 blocks</small>
+                  </div>
+                  <span className="chart-panel__period">
+                    LIVE <i>{stats.blockNumber === null ? PENDING : `#${stats.blockNumber.toLocaleString('en-US')}`}</i>
+                  </span>
+                </div>
                 <div className="chart-wrap">
-                  <svg className="pulse-chart" viewBox="0 0 720 260" preserveAspectRatio="none" role="img" aria-label="SER9 protocol activity rising over the last 24 hours">
-                    <title>SER9 protocol activity</title>
+                  <svg className="pulse-chart" viewBox="0 0 720 260" preserveAspectRatio="none" role="img" aria-label="Gas used per sampled Monad block">
+                    <title>Monad block gas usage</title>
                     <defs>
                       <linearGradient id="chart-fill" x1="0" x2="0" y1="0" y2="1">
                         <stop offset="0%" stopColor="#c9a45d" stopOpacity=".22" />
@@ -502,23 +750,26 @@ function App() {
                       </linearGradient>
                     </defs>
                     <path className="chart-grid-line" d="M0 32H720M0 98H720M0 164H720M0 230H720" />
-                    <path className="chart-area" d="M0 208 L65 184 L130 194 L196 156 L261 168 L327 124 L392 138 L458 96 L523 110 L589 69 L654 81 L720 24 V260 H0Z" />
-                    <path className="chart-line" d="M0 208 L65 184 L130 194 L196 156 L261 168 L327 124 L392 138 L458 96 L523 110 L589 69 L654 81 L720 24" />
-                    <circle className="chart-point" cx="720" cy="24" r="5" />
-                    <circle className="chart-point__halo" cx="720" cy="24" r="12" />
+                    <path className="chart-area" d={chart.area} />
+                    <path className="chart-line" d={chart.line} />
+                    <circle className="chart-point" cx={chart.lastX} cy={chart.lastY} r="5" />
+                    <circle className="chart-point__halo" cx={chart.lastX} cy={chart.lastY} r="12" />
                   </svg>
-                  <div className="chart-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>NOW</span></div>
+                  <div className="chart-axis"><span>-550</span><span>-400</span><span>-250</span><span>-100</span><span>NOW</span></div>
                 </div>
-                <div className="bar-strip" aria-label="Hourly activity volume">
-                  {chartValues.map((value, index) => <span className="bar-strip__item" key={`${value}-${index}`}><i style={{ height: `${value}%` }} /></span>)}
+                <div className="bar-strip" aria-label="Gas used per sampled block">
+                  {chartValues.map((value, index) => <span className="bar-strip__item" key={index}><i style={{ height: `${value}%` }} /></span>)}
                 </div>
               </div>
 
               <div className="activity-panel">
-                <div className="activity-panel__header"><div><span className="panel-kicker">RECENT ACTIVITY</span><strong>Latest signal</strong></div><span className="activity-live"><i /> live</span></div>
+                <div className="activity-panel__header">
+                  <div><span className="panel-kicker">PROTOCOL STATE</span><strong>Read from Monad</strong></div>
+                  <span className="activity-live"><i /> {stats.error ? 'stale' : 'live'}</span>
+                </div>
                 <div className="activity-list">
                   {activity.slice(0, showAllActivity ? activity.length : 3).map((item) => (
-                    <div className="activity-row" key={`${item.type}-${item.time}`}>
+                    <div className="activity-row" key={item.type}>
                       <span className="activity-row__icon"><Icon name={item.icon} size={17} /></span>
                       <span className="activity-row__copy"><strong>{item.type}</strong><small>{item.detail}</small></span>
                       <span className="activity-row__value"><strong>{item.amount}</strong><small>{item.time}</small></span>
@@ -526,7 +777,7 @@ function App() {
                   ))}
                 </div>
                 <button className="activity-more" type="button" aria-expanded={showAllActivity} onClick={() => setShowAllActivity((isOpen) => !isOpen)}>
-                  {showAllActivity ? 'Show less' : 'View all activity'} <ButtonArrow />
+                  {showAllActivity ? 'Show less' : 'View all readings'} <ButtonArrow />
                 </button>
               </div>
             </div>
@@ -542,8 +793,18 @@ function App() {
             </div>
             <div className="cta-section__aside">
               <p>Claim your place in the SERIES9 motion. The network is already in progress.</p>
-              <button className="button button--gold" type="button" onClick={() => announce('Launch sequence initiated. Connect your wallet to continue.')}>Launch SERIES9 <ButtonArrow /></button>
-              <span className="cta-section__note"><Icon name="lock" size={14} /> Non-custodial by design</span>
+              <button
+                className="button button--gold"
+                type="button"
+                disabled={wallet.connecting}
+                onClick={() => void handleConnectWallet()}
+              >
+                {connected && wallet.address ? `Connected ${shortenAddress(wallet.address)}` : 'Connect wallet'} <ButtonArrow />
+              </button>
+              <span className="cta-section__note">
+                <Icon name="lock" size={14} />{' '}
+                {wallet.available ? 'Non-custodial by design' : 'No injected wallet detected'}
+              </span>
             </div>
           </div>
           <div className="cta-section__stamp" aria-hidden="true">S9<br /><span>143</span></div>
@@ -557,7 +818,15 @@ function App() {
             <span className="brand__name">SERIES9</span>
           </a>
           <p>Identity in motion.</p>
-          <div className="site-footer__meta"><span>MONAD MAINNET / 143</span><span>© 2025 SERIES9</span></div>
+          <div className="site-footer__meta">
+            <a href={explorerAddressUrl(CONTRACTS.identity)} target="_blank" rel="noreferrer">
+              S9ID {shortenAddress(CONTRACTS.identity)}
+            </a>
+            <a href={explorerAddressUrl(CONTRACTS.ser9)} target="_blank" rel="noreferrer">
+              {symbol} {shortenAddress(CONTRACTS.ser9)}
+            </a>
+            <span>MONAD MAINNET / {MONAD.id}</span>
+          </div>
         </div>
       </footer>
 

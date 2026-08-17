@@ -322,6 +322,17 @@ a:focus-visible {
   color: #4e663d;
 }
 
+.wallet-button--warning {
+  border-color: rgba(214, 122, 92, .8);
+  color: #e29073;
+}
+
+.wallet-button:disabled,
+.button:disabled {
+  cursor: progress;
+  opacity: .6;
+}
+
 .menu-toggle {
   display: none;
   width: 38px;
@@ -1727,6 +1738,17 @@ a:focus-visible {
   font-size: 8px;
   font-weight: 800;
   letter-spacing: .1em;
+}
+
+.site-footer__meta a {
+  color: inherit;
+  text-decoration: none;
+  transition: color .2s ease;
+}
+
+.site-footer__meta a:hover,
+.site-footer__meta a:focus-visible {
+  color: var(--gold-bright);
 }
 
 .toast {

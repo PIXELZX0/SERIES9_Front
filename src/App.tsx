@@ -98,10 +98,16 @@ function formatInputUnits(value: bigint, decimals: number): string {
   return `${whole}.${fraction.toString().padStart(decimals, '0').replace(/0+$/, '')}`;
 }
 
+const LOCAL_TOKEN_LOGOS: Record<TokenKind, string> = {
+  SER9: `${import.meta.env.BASE_URL}token-logos/ser9.svg`,
+  MON: `${import.meta.env.BASE_URL}token-logos/mon.svg`,
+};
+
 function normalizeTokenImageUri(value: string | null | undefined): string | null {
   const uri = value?.trim();
   if (!uri) return null;
   if (/^https?:\/\//i.test(uri) || /^data:image\//i.test(uri)) return uri;
+  if (/^(?:\/|\.\.?\/)/.test(uri)) return uri;
   if (!/^ipfs:\/\//i.test(uri)) return null;
 
   const path = uri.replace(/^ipfs:\/\//i, '').replace(/^ipfs\//i, '');
@@ -119,8 +125,12 @@ function TokenLogo({
   size?: 'small' | 'medium';
   standalone?: boolean;
 }) {
-  const imageSource = token === 'SER9' ? normalizeTokenImageUri(imageUri) : null;
-  const [failedImageSource, setFailedImageSource] = useState<string | null>(null);
+  const dynamicImageSource = token === 'SER9' ? normalizeTokenImageUri(imageUri) : null;
+  const localImageSource = normalizeTokenImageUri(LOCAL_TOKEN_LOGOS[token]);
+  const [failedImageSources, setFailedImageSources] = useState<string[]>([]);
+  const imageSource = [dynamicImageSource, localImageSource].find(
+    (source): source is string => source !== null && !failedImageSources.includes(source),
+  );
   const label = token === 'MON' ? 'MON native token' : 'SER9 token';
 
   return (
@@ -130,8 +140,13 @@ function TokenLogo({
       aria-label={standalone ? label : undefined}
       aria-hidden={standalone ? undefined : true}
     >
-      {imageSource && failedImageSource !== imageSource ? (
-        <img src={imageSource} alt="" aria-hidden="true" onError={() => setFailedImageSource(imageSource)} />
+      {imageSource ? (
+        <img
+          src={imageSource}
+          alt=""
+          aria-hidden="true"
+          onError={() => setFailedImageSources((failed) => failed.includes(imageSource) ? failed : [...failed, imageSource])}
+        />
       ) : (
         <span className="token-logo__fallback" aria-hidden="true">{token === 'MON' ? 'M' : '9'}</span>
       )}

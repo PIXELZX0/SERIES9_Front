@@ -3,6 +3,7 @@ import {
   CONTRACTS,
   SELECTOR,
   callWithAddress,
+  callWithAddressAndUint,
   callWithUint,
   decodeAddress,
   decodeBool,
@@ -28,6 +29,10 @@ export type ProtocolStats = {
   ser9TotalSupply: bigint | null;
   totalStaked: bigint | null;
   rewardPerTokenStored: bigint | null;
+  rewardRatePerBlock: bigint | null;
+  totalMonadStaked: bigint | null;
+  monadRewardPerTokenStored: bigint | null;
+  monadRewardRatePerBlock: bigint | null;
   totalReputationScore: bigint | null;
   humanMintFee: bigint | null;
   aiMintFee: bigint | null;
@@ -42,12 +47,33 @@ export type AccountStats = {
   monBalance: bigint | null;
   ser9Balance: bigint | null;
   tokenId: bigint | null;
+  name: string | null;
   handle: string | null;
   smartWallet: string | null;
+  predictedWallet: string | null;
+  entityType: bigint | null;
   verified: boolean | null;
   reputation: bigint | null;
   staked: bigint | null;
+  stakingRewards: bigint | null;
+  monadStaked: bigint | null;
+  monadRewards: bigint | null;
+  pendingNFTRewards: bigint | null;
+  ser9UnstakeRequestCount: bigint | null;
+  ser9LatestUnstakeRequestId: bigint | null;
+  ser9LatestUnstakeRequest: UnstakeRequest | null;
+  monadUnstakeRequestCount: bigint | null;
+  monadLatestUnstakeRequestId: bigint | null;
+  monadLatestUnstakeRequest: UnstakeRequest | null;
+  /** Legacy alias retained for consumers of the first live-read build. */
   pendingRewards: bigint | null;
+};
+
+export type UnstakeRequest = {
+  amount: bigint;
+  requestEpoch: bigint;
+  minClaimEpoch: bigint;
+  claimed: boolean;
 };
 
 const EMPTY_ACCOUNT: AccountStats = {
@@ -55,11 +81,24 @@ const EMPTY_ACCOUNT: AccountStats = {
   monBalance: null,
   ser9Balance: null,
   tokenId: null,
+  name: null,
   handle: null,
   smartWallet: null,
+  predictedWallet: null,
+  entityType: null,
   verified: null,
   reputation: null,
   staked: null,
+  stakingRewards: null,
+  monadStaked: null,
+  monadRewards: null,
+  pendingNFTRewards: null,
+  ser9UnstakeRequestCount: null,
+  ser9LatestUnstakeRequestId: null,
+  ser9LatestUnstakeRequest: null,
+  monadUnstakeRequestCount: null,
+  monadLatestUnstakeRequestId: null,
+  monadLatestUnstakeRequest: null,
   pendingRewards: null,
 };
 
@@ -145,6 +184,10 @@ export function useProtocol(): ProtocolStats {
     ser9TotalSupply: null,
     totalStaked: null,
     rewardPerTokenStored: null,
+    rewardRatePerBlock: null,
+    totalMonadStaked: null,
+    monadRewardPerTokenStored: null,
+    monadRewardRatePerBlock: null,
     totalReputationScore: null,
     humanMintFee: null,
     aiMintFee: null,
@@ -171,6 +214,10 @@ export function useProtocol(): ProtocolStats {
             ethCall(CONTRACTS.ser9, SELECTOR.totalSupply),
             ethCall(CONTRACTS.staking, SELECTOR.totalStaked),
             ethCall(CONTRACTS.staking, SELECTOR.rewardPerTokenStored),
+            ethCall(CONTRACTS.staking, SELECTOR.rewardRatePerBlock),
+            ethCall(CONTRACTS.staking, SELECTOR.totalMonadStaked),
+            ethCall(CONTRACTS.staking, SELECTOR.monadRewardPerTokenStored),
+            ethCall(CONTRACTS.staking, SELECTOR.monadRewardRatePerBlock),
             ethCall(CONTRACTS.identity, SELECTOR.totalReputationScore),
             ethCall(CONTRACTS.identity, SELECTOR.humanMintFee),
             ethCall(CONTRACTS.identity, SELECTOR.aiMintFee),
@@ -193,9 +240,13 @@ export function useProtocol(): ProtocolStats {
           ser9TotalSupply: decodeUint(results[4]),
           totalStaked: decodeUint(results[5]),
           rewardPerTokenStored: decodeUint(results[6]),
-          totalReputationScore: decodeUint(results[7]),
-          humanMintFee: decodeUint(results[8]),
-          aiMintFee: decodeUint(results[9]),
+          rewardRatePerBlock: decodeUint(results[7]),
+          totalMonadStaked: decodeUint(results[8]),
+          monadRewardPerTokenStored: decodeUint(results[9]),
+          monadRewardRatePerBlock: decodeUint(results[10]),
+          totalReputationScore: decodeUint(results[11]),
+          humanMintFee: decodeUint(results[12]),
+          aiMintFee: decodeUint(results[13]),
           gasSeries,
         }));
 
@@ -231,6 +282,19 @@ export function useProtocol(): ProtocolStats {
   return stats;
 }
 
+function decodeUnstakeRequest(result: unknown): UnstakeRequest | null {
+  if (typeof result !== 'string' || !/^0x[0-9a-fA-F]{256}$/.test(result)) return null;
+
+  const word = (index: number) => decodeUint(`0x${result.slice(2 + index * 64, 2 + (index + 1) * 64)}`);
+  const amount = word(0);
+  const requestEpoch = word(1);
+  const minClaimEpoch = word(2);
+  const claimed = decodeBool(`0x${result.slice(2 + 3 * 64, 2 + 4 * 64)}`);
+
+  if (amount === null || requestEpoch === null || minClaimEpoch === null || claimed === null) return null;
+  return { amount, requestEpoch, minClaimEpoch, claimed };
+}
+
 export function useAccount(address: string | null, blockNumber: bigint | null): AccountStats {
   const [snapshot, setSnapshot] = useState<{ address: string; data: AccountStats } | null>(null);
 
@@ -246,6 +310,11 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
         callWithAddress(CONTRACTS.identity, SELECTOR.reputationScoreOf, target),
         callWithAddress(CONTRACTS.staking, SELECTOR.stakedBalance, target),
         callWithAddress(CONTRACTS.identity, SELECTOR.pendingNFTRewards, target),
+        callWithAddress(CONTRACTS.staking, SELECTOR.earned, target),
+        callWithAddress(CONTRACTS.staking, SELECTOR.monadEarned, target),
+        callWithAddress(CONTRACTS.staking, SELECTOR.monadStakedBalance, target),
+        callWithAddress(CONTRACTS.staking, SELECTOR.ser9UnstakeRequestCount, target),
+        callWithAddress(CONTRACTS.staking, SELECTOR.monadUnstakeRequestCount, target),
       ],
       signal,
     );
@@ -256,25 +325,67 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
     const identityResults = hasIdentity
       ? await rpcBatch(
           [
+            callWithAddress(CONTRACTS.identity, SELECTOR.nameOf, target),
             callWithUint(CONTRACTS.identity, SELECTOR.handleOf, tokenId),
             callWithUint(CONTRACTS.identity, SELECTOR.walletOf, tokenId),
+            callWithUint(CONTRACTS.identity, SELECTOR.predictWalletAddress, tokenId),
+            callWithUint(CONTRACTS.identity, SELECTOR.getEntityType, tokenId),
             callWithUint(CONTRACTS.identity, SELECTOR.isVerified, tokenId),
           ],
           signal,
-        )
-      : [null, null, null];
+        ).catch(() => [null, null, null, null, null, null])
+      : [null, null, null, null, null, null];
+
+    const ser9UnstakeRequestCount = decodeUint(results[9]);
+    const monadUnstakeRequestCount = decodeUint(results[10]);
+    const requestResults = await rpcBatch(
+      [
+        ...(ser9UnstakeRequestCount !== null && ser9UnstakeRequestCount > 0n
+          ? [callWithAddressAndUint(CONTRACTS.staking, SELECTOR.ser9UnstakeRequest, target, ser9UnstakeRequestCount - 1n)]
+          : []),
+        ...(monadUnstakeRequestCount !== null && monadUnstakeRequestCount > 0n
+          ? [callWithAddressAndUint(CONTRACTS.staking, SELECTOR.monadUnstakeRequest, target, monadUnstakeRequestCount - 1n)]
+          : []),
+      ],
+      signal,
+    ).catch(() => []);
+
+    let requestIndex = 0;
+    const ser9LatestUnstakeRequest = ser9UnstakeRequestCount !== null && ser9UnstakeRequestCount > 0n
+      ? decodeUnstakeRequest(requestResults[requestIndex++])
+      : null;
+    const monadLatestUnstakeRequest = monadUnstakeRequestCount !== null && monadUnstakeRequestCount > 0n
+      ? decodeUnstakeRequest(requestResults[requestIndex])
+      : null;
+
+    const pendingNFTRewards = decodeUint(results[5]);
 
     return {
       loading: false,
       monBalance: decodeUint(results[0]),
       ser9Balance: decodeUint(results[1]),
       tokenId: hasIdentity ? tokenId : null,
-      handle: decodeString(identityResults[0]),
-      smartWallet: decodeAddress(identityResults[1]),
-      verified: decodeBool(identityResults[2]),
+      name: decodeString(identityResults[0]),
+      handle: decodeString(identityResults[1]),
+      smartWallet: decodeAddress(identityResults[2]),
+      predictedWallet: decodeAddress(identityResults[3]),
+      entityType: decodeUint(identityResults[4]),
+      verified: decodeBool(identityResults[5]),
       reputation: decodeUint(results[3]),
       staked: decodeUint(results[4]),
-      pendingRewards: decodeUint(results[5]),
+      stakingRewards: decodeUint(results[6]),
+      monadStaked: decodeUint(results[8]),
+      monadRewards: decodeUint(results[7]),
+      pendingNFTRewards,
+      ser9UnstakeRequestCount,
+      ser9LatestUnstakeRequestId:
+        ser9UnstakeRequestCount !== null && ser9UnstakeRequestCount > 0n ? ser9UnstakeRequestCount - 1n : null,
+      ser9LatestUnstakeRequest,
+      monadUnstakeRequestCount,
+      monadLatestUnstakeRequestId:
+        monadUnstakeRequestCount !== null && monadUnstakeRequestCount > 0n ? monadUnstakeRequestCount - 1n : null,
+      monadLatestUnstakeRequest,
+      pendingRewards: pendingNFTRewards,
     };
   }, []);
 

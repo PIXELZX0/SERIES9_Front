@@ -25,6 +25,8 @@ import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from '
 
 type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'wallet';
 type SectionId = 'overview' | 'identity' | 'staking' | 'pulse';
+type SiteRoute = '/' | '/identity' | '/staking';
+type Page = 'home' | 'identity' | 'staking';
 type TokenKind = 'SER9' | 'MON';
 type StakingAsset = TokenKind;
 type ToastKind = 'success' | 'error';
@@ -181,11 +183,28 @@ function shortenHash(hash: string): string {
   return `${hash.slice(0, 10)}...${hash.slice(-6)}`;
 }
 
-const navLinks: Array<{ label: string; href: `#${SectionId}`; id: SectionId }> = [
-  { label: 'Overview', href: '#overview', id: 'overview' },
-  { label: 'Identity', href: '#identity', id: 'identity' },
-  { label: 'Staking', href: '#staking', id: 'staking' },
-  { label: 'Pulse', href: '#pulse', id: 'pulse' },
+function routeHref(route: SiteRoute, hash = ''): string {
+  const basePath = import.meta.env.BASE_URL.replace(/\/+$/, '');
+  return `${basePath}${route}${hash}` || '/';
+}
+
+function currentPage(pathname = window.location.pathname): Page {
+  const basePath = import.meta.env.BASE_URL.replace(/\/+$/, '');
+  const routePath = basePath && (pathname === basePath || pathname.startsWith(`${basePath}/`))
+    ? pathname.slice(basePath.length)
+    : pathname;
+  const normalizedPath = routePath.replace(/\/+$/, '') || '/';
+
+  if (normalizedPath === '/identity') return 'identity';
+  if (normalizedPath === '/staking') return 'staking';
+  return 'home';
+}
+
+const navLinks: Array<{ label: string; href: string; id: SectionId }> = [
+  { label: 'Overview', href: routeHref('/', '#overview'), id: 'overview' },
+  { label: 'Identity', href: routeHref('/identity'), id: 'identity' },
+  { label: 'Staking', href: routeHref('/staking'), id: 'staking' },
+  { label: 'Pulse', href: routeHref('/', '#pulse'), id: 'pulse' },
 ];
 
 function buildFeatures(stats: ProtocolStats): Feature[] {
@@ -459,7 +478,12 @@ function ButtonArrow() {
 }
 
 function FeatureCard({ feature, ser9Image }: { feature: Feature; ser9Image: string | null }) {
-  const workspaceHref = feature.id === 'wallet' ? '#identity' : `#${feature.id}`;
+  const workspaceRoutes: Record<Feature['id'], SiteRoute> = {
+    identity: '/identity',
+    staking: '/staking',
+    wallet: '/identity',
+  };
+  const workspaceHref = routeHref(workspaceRoutes[feature.id]);
 
   return (
     <article className={`feature-card feature-card--${feature.theme}`}>
@@ -504,6 +528,9 @@ function FeatureCard({ feature, ser9Image }: { feature: Feature; ser9Image: stri
 }
 
 function App() {
+  const page = currentPage();
+  const isHomePage = page === 'home';
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAllActivity, setShowAllActivity] = useState(false);
   const [toast, setToast] = useState<{ message: string; kind: ToastKind } | null>(null);
@@ -592,7 +619,9 @@ function App() {
   }, [walletAddress, walletOnMonad, estimateTransactionFee]);
 
   useEffect(() => {
-    const sectionIds: SectionId[] = ['overview', 'identity', 'staking', 'pulse'];
+    if (!isHomePage) return;
+
+    const sectionIds: SectionId[] = ['overview', 'pulse'];
     const updateActiveSection = () => {
       const position = window.scrollY + 180;
       let currentSection: SectionId = 'overview';
@@ -610,7 +639,7 @@ function App() {
     updateActiveSection();
     window.addEventListener('scroll', updateActiveSection, { passive: true });
     return () => window.removeEventListener('scroll', updateActiveSection);
-  }, []);
+  }, [isHomePage]);
 
   useEffect(() => {
     if (!toast) return;
@@ -926,11 +955,17 @@ function App() {
     if (selectedBalance !== null) setStakingAmount(formatInputUnits(selectedBalance, selectedDecimals));
   }
 
+  function isNavLinkActive(sectionId: SectionId): boolean {
+    return page === 'home'
+      ? (sectionId === 'overview' || sectionId === 'pulse') && activeSection === sectionId
+      : sectionId === page;
+  }
+
   return (
-    <div className="site-shell">
+    <div className={`site-shell${isHomePage ? '' : ' site-shell--workspace'}`}>
       <header className="site-header">
         <div className="site-header__inner container">
-          <a className="brand" href="#overview" onClick={handleNavClick} aria-label="SERIES9 home">
+          <a className="brand" href={routeHref('/', '#overview')} onClick={handleNavClick} aria-label="SERIES9 home">
             <span className="brand__mark">S9</span>
             <span className="brand__name">SERIES9</span>
           </a>
@@ -938,11 +973,11 @@ function App() {
           <nav ref={navRef} className={`primary-nav${menuOpen ? ' is-open' : ''}`} id="primary-navigation" aria-label="Primary navigation">
             {navLinks.map((link) => (
               <a
-                className={activeSection === link.id ? 'is-active' : ''}
+                className={isNavLinkActive(link.id) ? 'is-active' : ''}
                 href={link.href}
                 key={link.id}
                 onClick={handleNavClick}
-                aria-current={activeSection === link.id ? 'location' : undefined}
+                aria-current={isNavLinkActive(link.id) ? 'location' : undefined}
               >
                 {link.label}
               </a>
@@ -1005,7 +1040,9 @@ function App() {
       </header>
 
       <main>
-        <section className="hero" id="overview" aria-labelledby="hero-title">
+        {isHomePage && (
+          <>
+            <section className="hero" id="overview" aria-labelledby="hero-title">
           <div className="hero__grid-overlay" aria-hidden="true" />
           <div className="container hero__inner">
             <div className="hero__copy">
@@ -1119,9 +1156,9 @@ function App() {
             </figure>
           </div>
           <div className="hero__footer-line container"><span>scroll to enter</span><span className="hero__footer-arrow" aria-hidden="true">↓</span><span>09—∞</span></div>
-        </section>
+            </section>
 
-        <section className="signal-strip" aria-label="Live protocol signals">
+            <section className="signal-strip" aria-label="Live protocol signals">
           <div className="container signal-strip__grid">
             <div className="signal-strip__intro"><span className="signal-strip__pulse" /> LIVE SIGNAL</div>
             <div className="signal-metric">
@@ -1145,9 +1182,9 @@ function App() {
               <small>{stats.error ? 'RPC unreachable' : `Block ${stats.blockNumber?.toLocaleString('en-US') ?? PENDING}`}</small>
             </div>
           </div>
-        </section>
+            </section>
 
-        <section className="features-section" id="protocol" aria-labelledby="features-title">
+            <section className="features-section" id="protocol" aria-labelledby="features-title">
           <div className="container">
             <div className="section-intro section-intro--features">
               <div>
@@ -1160,9 +1197,12 @@ function App() {
                {features.map((feature) => <FeatureCard feature={feature} key={feature.id} ser9Image={stats.ser9Image} />)}
             </div>
           </div>
-        </section>
+            </section>
+          </>
+        )}
 
-        <section className="workspace-section workspace-section--identity" id="identity" aria-labelledby="identity-workspace-title">
+        {page === 'identity' && (
+          <section className="workspace-section workspace-section--identity" aria-labelledby="identity-workspace-title">
           <div className="container">
             <div className="workspace-heading">
               <div>
@@ -1326,9 +1366,11 @@ function App() {
               </article>
             </div>
           </div>
-        </section>
+          </section>
+        )}
 
-        <section className="workspace-section workspace-section--staking" id="staking" aria-labelledby="staking-workspace-title">
+        {page === 'staking' && (
+          <section className="workspace-section workspace-section--staking" aria-labelledby="staking-workspace-title">
           <div className="container">
             <div className="workspace-heading">
               <div>
@@ -1453,9 +1495,12 @@ function App() {
               </article>
             </div>
           </div>
-        </section>
+          </section>
+        )}
 
-        <section className="architecture-section" id="architecture" aria-labelledby="architecture-title">
+        {isHomePage && (
+          <>
+            <section className="architecture-section" id="architecture" aria-labelledby="architecture-title">
           <div className="container architecture-section__inner">
             <div className="architecture-copy">
               <p className="eyebrow eyebrow--gold"><span className="eyebrow__line" />THE ARCHITECTURE</p>
@@ -1607,12 +1652,14 @@ function App() {
             </div>
           </div>
           <div className="cta-section__stamp" aria-hidden="true">S9<br /><span>143</span></div>
-        </section>
+            </section>
+          </>
+        )}
       </main>
 
       <footer className="site-footer">
         <div className="container site-footer__inner">
-          <a className="brand brand--footer" href="#overview" aria-label="SERIES9 home">
+          <a className="brand brand--footer" href={routeHref('/', '#overview')} aria-label="SERIES9 home">
             <span className="brand__mark">S9</span>
             <span className="brand__name">SERIES9</span>
           </a>

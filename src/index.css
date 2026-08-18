@@ -408,6 +408,40 @@ a:focus-visible {
   color: var(--paper);
 }
 
+.site-shell--workspace {
+  min-height: 100vh;
+  background: var(--paper);
+}
+
+.site-shell--workspace .site-header {
+  position: relative;
+  border-bottom-color: var(--line);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.site-shell--workspace .primary-nav a {
+  color: var(--ink-muted);
+}
+
+.site-shell--workspace .primary-nav a:focus-visible,
+.site-shell--workspace .primary-nav a.is-active {
+  color: var(--ink);
+}
+
+.site-shell--workspace .network-status {
+  color: var(--ink-muted);
+}
+
+.site-shell--workspace .network-status:focus-visible {
+  color: var(--ink);
+}
+
+.site-shell--workspace .menu-toggle {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
 .hero {
   position: relative;
   min-height: 790px;
@@ -2863,8 +2897,16 @@ a:focus-visible {
     transform-origin: left;
   }
 
+  .site-shell--workspace .primary-nav a:hover {
+    color: var(--ink);
+  }
+
   .network-status:hover {
     color: var(--paper);
+  }
+
+  .site-shell--workspace .network-status:hover {
+    color: var(--ink);
   }
 
   .wallet-button:hover {
@@ -3003,6 +3045,21 @@ a:focus-visible {
     right: auto;
     bottom: 0;
     width: 24px;
+  }
+
+  .site-shell--workspace .primary-nav {
+    border-color: var(--line);
+    background: rgba(251, 250, 246, .98);
+  }
+
+  .site-shell--workspace .primary-nav a {
+    border-bottom-color: var(--line);
+    color: var(--ink-muted);
+  }
+
+  .site-shell--workspace .primary-nav a:hover,
+  .site-shell--workspace .primary-nav a.is-active {
+    color: var(--ink);
   }
 
   .menu-toggle {

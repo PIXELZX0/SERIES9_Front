@@ -25,6 +25,8 @@ export type ProtocolStats = {
   blockNumber: bigint | null;
   gasPriceWei: bigint | null;
   ser9Symbol: string | null;
+  ser9Image: string | null;
+  ser9Description: string | null;
   ser9Decimals: number;
   ser9TotalSupply: bigint | null;
   totalStaked: bigint | null;
@@ -180,6 +182,8 @@ export function useProtocol(): ProtocolStats {
     blockNumber: null,
     gasPriceWei: null,
     ser9Symbol: null,
+    ser9Image: null,
+    ser9Description: null,
     ser9Decimals: 18,
     ser9TotalSupply: null,
     totalStaked: null,
@@ -210,6 +214,8 @@ export function useProtocol(): ProtocolStats {
             { method: 'eth_blockNumber', params: [] },
             { method: 'eth_gasPrice', params: [] },
             ethCall(CONTRACTS.ser9, SELECTOR.symbol),
+            ethCall(CONTRACTS.ser9, SELECTOR.image),
+            ethCall(CONTRACTS.ser9, SELECTOR.description),
             ethCall(CONTRACTS.ser9, SELECTOR.decimals),
             ethCall(CONTRACTS.ser9, SELECTOR.totalSupply),
             ethCall(CONTRACTS.staking, SELECTOR.totalStaked),
@@ -226,7 +232,7 @@ export function useProtocol(): ProtocolStats {
         );
 
         const blockNumber = decodeUint(results[0]);
-        const decimals = decodeUint(results[3]);
+        const decimals = decodeUint(results[5]);
         const gasSeries = blockNumber ? await fetchGasSeries(blockNumber, controller.signal) : [];
 
         setStats((previous) => ({
@@ -236,17 +242,19 @@ export function useProtocol(): ProtocolStats {
           blockNumber,
           gasPriceWei: decodeUint(results[1]),
           ser9Symbol: decodeString(results[2]),
+          ser9Image: decodeString(results[3]),
+          ser9Description: decodeString(results[4]),
           ser9Decimals: decimals === null ? 18 : Number(decimals),
-          ser9TotalSupply: decodeUint(results[4]),
-          totalStaked: decodeUint(results[5]),
-          rewardPerTokenStored: decodeUint(results[6]),
-          rewardRatePerBlock: decodeUint(results[7]),
-          totalMonadStaked: decodeUint(results[8]),
-          monadRewardPerTokenStored: decodeUint(results[9]),
-          monadRewardRatePerBlock: decodeUint(results[10]),
-          totalReputationScore: decodeUint(results[11]),
-          humanMintFee: decodeUint(results[12]),
-          aiMintFee: decodeUint(results[13]),
+          ser9TotalSupply: decodeUint(results[6]),
+          totalStaked: decodeUint(results[7]),
+          rewardPerTokenStored: decodeUint(results[8]),
+          rewardRatePerBlock: decodeUint(results[9]),
+          totalMonadStaked: decodeUint(results[10]),
+          monadRewardPerTokenStored: decodeUint(results[11]),
+          monadRewardRatePerBlock: decodeUint(results[12]),
+          totalReputationScore: decodeUint(results[13]),
+          humanMintFee: decodeUint(results[14]),
+          aiMintFee: decodeUint(results[15]),
           gasSeries,
         }));
 

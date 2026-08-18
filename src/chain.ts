@@ -30,6 +30,8 @@ export const SELECTOR = {
   totalSupply: '0x18160ddd',
   decimals: '0x313ce567',
   symbol: '0x95d89b41',
+  image: '0xf3ccaac0',
+  description: '0x7284e416',
   ownerTokenId: '0x27329fea',
   walletOf: '0xe0fa88e1',
   handleOf: '0x49491987',

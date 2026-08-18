@@ -23,6 +23,8 @@ import {
 import { fetchGasSeries, fetchIdentityCount } from './useProtocol.ts';
 
 // ── encoding ──────────────────────────────────────────────────────────────────
+assert.equal(SELECTOR.image, '0xf3ccaac0');
+assert.equal(SELECTOR.description, '0x7284e416');
 assert.equal(
   callWithAddress(CONTRACTS.ser9, SELECTOR.balanceOf, '0xD2cF3765C2e600f13470Ed71aaAb0ee3aa37F90a').params[0]
     ? (callWithAddress(CONTRACTS.ser9, SELECTOR.balanceOf, '0xD2cF3765C2e600f13470Ed71aaAb0ee3aa37F90a')
@@ -68,15 +70,19 @@ assert.equal(formatCompact(42n * 10n ** 18n), '42');
 assert.equal(shortenAddress('0xD2cF3765C2e600f13470Ed71aaAb0ee3aa37F90a'), '0xD2cF...F90a');
 
 // ── live read ─────────────────────────────────────────────────────────────────
-const [block, symbol, staked, owner] = await rpcBatch([
+const [block, symbol, image, description, staked, owner] = await rpcBatch([
   { method: 'eth_blockNumber', params: [] },
   ethCall(CONTRACTS.ser9, SELECTOR.symbol),
+  ethCall(CONTRACTS.ser9, SELECTOR.image),
+  ethCall(CONTRACTS.ser9, SELECTOR.description),
   ethCall(CONTRACTS.staking, SELECTOR.totalStaked),
   callWithUint(CONTRACTS.identity, SELECTOR.ownerOf, 1n),
 ]);
 
 assert.ok((decodeUint(block) ?? 0n) > 0n, 'block number should advance');
 assert.equal(decodeString(symbol), 'SER9');
+assert.ok(decodeString(image)?.startsWith('data:image/svg+xml;base64,'), 'SER9 image should be an on-chain SVG data URI');
+assert.equal(typeof decodeString(description), 'string', 'SER9 description should decode as a string');
 assert.ok((decodeUint(staked) ?? 0n) > 0n, 'staking contract should hold SER9');
 assert.ok(decodeAddress(owner), 'identity #1 should have an owner');
 

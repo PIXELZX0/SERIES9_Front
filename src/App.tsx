@@ -25,7 +25,8 @@ import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from '
 
 type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'wallet';
 type SectionId = 'overview' | 'identity' | 'staking' | 'pulse';
-type StakingAsset = 'SER9' | 'MON';
+type TokenKind = 'SER9' | 'MON';
+type StakingAsset = TokenKind;
 type ToastKind = 'success' | 'error';
 
 type Feature = {
@@ -36,9 +37,10 @@ type Feature = {
   description: string;
   statLabel: string;
   statValue: string;
+  statToken?: TokenKind;
   icon: IconName;
   theme: 'light' | 'sand' | 'dark';
-  details: string[];
+  details: Array<{ text: string; token?: TokenKind }>;
 };
 
 type Activity = {
@@ -46,6 +48,8 @@ type Activity = {
   detail: string;
   amount: string;
   time: string;
+  token?: TokenKind;
+  timeToken?: TokenKind;
   icon: IconName;
 };
 
@@ -92,6 +96,47 @@ function formatInputUnits(value: bigint, decimals: number): string {
   const fraction = value % base;
   if (fraction === 0n) return whole.toString();
   return `${whole}.${fraction.toString().padStart(decimals, '0').replace(/0+$/, '')}`;
+}
+
+function normalizeTokenImageUri(value: string | null | undefined): string | null {
+  const uri = value?.trim();
+  if (!uri) return null;
+  if (/^https?:\/\//i.test(uri) || /^data:image\//i.test(uri)) return uri;
+  if (!/^ipfs:\/\//i.test(uri)) return null;
+
+  const path = uri.replace(/^ipfs:\/\//i, '').replace(/^ipfs\//i, '');
+  return path ? `https://ipfs.io/ipfs/${path}` : null;
+}
+
+function TokenLogo({
+  token,
+  imageUri,
+  size = 'small',
+  standalone = false,
+}: {
+  token: TokenKind;
+  imageUri?: string | null;
+  size?: 'small' | 'medium';
+  standalone?: boolean;
+}) {
+  const imageSource = token === 'SER9' ? normalizeTokenImageUri(imageUri) : null;
+  const [failedImageSource, setFailedImageSource] = useState<string | null>(null);
+  const label = token === 'MON' ? 'MON native token' : 'SER9 token';
+
+  return (
+    <span
+      className={`token-logo token-logo--${size}`}
+      role={standalone ? 'img' : undefined}
+      aria-label={standalone ? label : undefined}
+      aria-hidden={standalone ? undefined : true}
+    >
+      {imageSource && failedImageSource !== imageSource ? (
+        <img src={imageSource} alt="" aria-hidden="true" onError={() => setFailedImageSource(imageSource)} />
+      ) : (
+        <span className="token-logo__fallback" aria-hidden="true">{token === 'MON' ? 'M' : '9'}</span>
+      )}
+    </span>
+  );
 }
 
 function parseRequestId(value: string, latest: bigint | null): bigint | null {
@@ -144,8 +189,8 @@ function buildFeatures(stats: ProtocolStats): Feature[] {
       icon: 'diamond',
       theme: 'light',
       details: [
-        `Human mint fee ${tokenAmount(stats.humanMintFee, stats.ser9Decimals, 0)} ${symbol}`,
-        `AI mint fee ${tokenAmount(stats.aiMintFee, stats.ser9Decimals, 0)} ${symbol}`,
+        { text: `Human mint fee ${tokenAmount(stats.humanMintFee, stats.ser9Decimals, 0)} ${symbol}`, token: 'SER9' },
+        { text: `AI mint fee ${tokenAmount(stats.aiMintFee, stats.ser9Decimals, 0)} ${symbol}`, token: 'SER9' },
       ],
     },
     {
@@ -157,11 +202,12 @@ function buildFeatures(stats: ProtocolStats): Feature[] {
         'Turn conviction into a position. Stake SER9, collect protocol rewards, and keep moving.',
       statLabel: `Total staked (${symbol})`,
       statValue: compactAmount(stats.totalStaked, stats.ser9Decimals),
+      statToken: 'SER9',
       icon: 'bolt',
       theme: 'sand',
       details: [
-        `Reward index ${tokenAmount(stats.rewardPerTokenStored, stats.ser9Decimals, 2)}`,
-        'Rewards accrue per block',
+        { text: `Reward index ${tokenAmount(stats.rewardPerTokenStored, stats.ser9Decimals, 2)}`, token: 'SER9' },
+        { text: 'Rewards accrue per block' },
       ],
     },
     {
@@ -175,7 +221,7 @@ function buildFeatures(stats: ProtocolStats): Feature[] {
       statValue: stats.walletCount === null ? PENDING : stats.walletCount.toLocaleString('en-US'),
       icon: 'wallet',
       theme: 'dark',
-      details: ['Deterministic CREATE2 address', 'Built for Monad speed'],
+      details: [{ text: 'Deterministic CREATE2 address' }, { text: 'Built for Monad speed' }],
     },
   ];
 }
@@ -197,6 +243,7 @@ function buildActivity(stats: ProtocolStats, account: AccountStats, connected: b
       detail: `${symbol} in staking contract`,
       amount: `${compactAmount(stats.totalStaked, stats.ser9Decimals)} ${symbol}`,
       time: shortenAddress(CONTRACTS.staking),
+      token: 'SER9',
       icon: 'bolt',
     },
     {
@@ -211,6 +258,7 @@ function buildActivity(stats: ProtocolStats, account: AccountStats, connected: b
       detail: 'ERC-20 totalSupply',
       amount: `${compactAmount(stats.ser9TotalSupply, stats.ser9Decimals)} ${symbol}`,
       time: shortenAddress(CONTRACTS.ser9),
+      token: 'SER9',
       icon: 'cubes',
     },
     {
@@ -230,13 +278,16 @@ function buildActivity(stats: ProtocolStats, account: AccountStats, connected: b
         detail: 'Connected wallet',
         amount: `${tokenAmount(account.ser9Balance, stats.ser9Decimals)} ${symbol}`,
         time: 'live',
+        token: 'SER9',
         icon: 'wallet',
       },
       {
         type: 'Your staked position',
         detail: 'Series9 staking',
         amount: `${tokenAmount(account.staked, stats.ser9Decimals)} ${symbol}`,
-        time: `earned ${tokenAmount(account.stakingRewards, stats.ser9Decimals)}`,
+        time: `earned ${tokenAmount(account.stakingRewards, stats.ser9Decimals)} ${symbol}`,
+        token: 'SER9',
+        timeToken: 'SER9',
         icon: 'bolt',
       },
     );
@@ -392,7 +443,7 @@ function ButtonArrow() {
   return <Icon name="arrow" size={16} />;
 }
 
-function FeatureCard({ feature }: { feature: Feature }) {
+function FeatureCard({ feature, ser9Image }: { feature: Feature; ser9Image: string | null }) {
   const workspaceHref = feature.id === 'wallet' ? '#identity' : `#${feature.id}`;
 
   return (
@@ -408,7 +459,15 @@ function FeatureCard({ feature }: { feature: Feature }) {
       </div>
       <ul className="feature-card__details" aria-label={`${feature.eyebrow} details`}>
         {feature.details.map((detail) => (
-          <li key={detail}><span className="detail-dot" />{detail}</li>
+          <li key={detail.text}>
+            <span className="detail-dot" />
+            {detail.token ? (
+              <span className="token-label">
+                <span>{detail.text}</span>
+                <TokenLogo token={detail.token} imageUri={detail.token === 'SER9' ? ser9Image : undefined} />
+              </span>
+            ) : detail.text}
+          </li>
         ))}
       </ul>
       <a className="feature-card__link" href={workspaceHref}>
@@ -416,7 +475,14 @@ function FeatureCard({ feature }: { feature: Feature }) {
       </a>
       <div className="feature-card__stat">
         <span>{feature.statLabel}</span>
-        <strong>{feature.statValue}</strong>
+        {feature.statToken ? (
+          <strong className="token-value">
+            <span>{feature.statValue}</span>
+            <TokenLogo token={feature.statToken} imageUri={feature.statToken === 'SER9' ? ser9Image : undefined} />
+          </strong>
+        ) : (
+          <strong>{feature.statValue}</strong>
+        )}
       </div>
     </article>
   );
@@ -1006,10 +1072,17 @@ function App() {
                 </div>
               </div>
               <div className="identity-float identity-float--top">
-                <span className="identity-float__label">{symbol} BALANCE</span>
-                <strong>{connected ? tokenAmount(account.ser9Balance, stats.ser9Decimals) : PENDING}</strong>
-                <span className="identity-float__change">
-                  {connected ? `${tokenAmount(account.monBalance, MONAD.nativeCurrency.decimals)} MON` : 'not connected'}
+                <span className="identity-float__label token-label">
+                  <TokenLogo token="SER9" imageUri={stats.ser9Image} />
+                  <span>{symbol} BALANCE</span>
+                </span>
+                <strong className="token-value">
+                  <span>{connected ? tokenAmount(account.ser9Balance, stats.ser9Decimals) : PENDING}</span>
+                  <TokenLogo token="SER9" imageUri={stats.ser9Image} />
+                </strong>
+                <span className="identity-float__change token-label">
+                  <TokenLogo token="MON" />
+                  <span>{connected ? `${tokenAmount(account.monBalance, MONAD.nativeCurrency.decimals)} MON` : 'not connected'}</span>
                 </span>
               </div>
               <div className="identity-float identity-float--bottom">
@@ -1037,12 +1110,12 @@ function App() {
           <div className="container signal-strip__grid">
             <div className="signal-strip__intro"><span className="signal-strip__pulse" /> LIVE SIGNAL</div>
             <div className="signal-metric">
-              <span>{symbol} / SUPPLY</span>
+              <span className="token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol} / SUPPLY</span></span>
               <strong>{compactAmount(stats.ser9TotalSupply, stats.ser9Decimals)}</strong>
               <small>{symbol}</small>
             </div>
             <div className="signal-metric">
-              <span>TOTAL STAKED</span>
+              <span className="token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>TOTAL STAKED</span></span>
               <strong>{compactAmount(stats.totalStaked, stats.ser9Decimals)}</strong>
               <small>{symbol}</small>
             </div>
@@ -1069,7 +1142,7 @@ function App() {
               <p className="section-intro__copy">Everything you need to be legible, aligned, and active in the next internet.</p>
             </div>
             <div className="feature-grid">
-              {features.map((feature) => <FeatureCard feature={feature} key={feature.id} />)}
+               {features.map((feature) => <FeatureCard feature={feature} key={feature.id} ser9Image={stats.ser9Image} />)}
             </div>
           </div>
         </section>
@@ -1154,8 +1227,8 @@ function App() {
                           ? `Future address ${shortenAddress(account.predictedWallet)}`
                           : 'Wallet factory read unavailable'}
                     </div>
-                    <div className="identity-summary__footer">
-                      <span>NFT rewards <strong>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol}</strong></span>
+                     <div className="identity-summary__footer">
+                       <span>NFT rewards <strong className="token-value"><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></strong></span>
                       <button
                         className="workspace-button workspace-button--small"
                         type="button"
@@ -1205,7 +1278,7 @@ function App() {
                     </div>
                     <div className="workspace-fee-row">
                       <span>{mintEntityType === 'human' ? 'Human' : 'AI'} mint fee</span>
-                      <strong>{tokenAmount(mintEntityType === 'human' ? stats.humanMintFee : stats.aiMintFee, stats.ser9Decimals, 2)} {symbol}</strong>
+                      <strong className="token-value"><span>{tokenAmount(mintEntityType === 'human' ? stats.humanMintFee : stats.aiMintFee, stats.ser9Decimals, 2)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></strong>
                     </div>
                     {mintFeeInsufficient && <p className="workspace-form__error">This wallet needs more {symbol} to cover the live mint fee.</p>}
                     <p className="workspace-form__note">SER9 approval is confirmed first, then the identity mint is submitted. Both receipts must succeed.</p>
@@ -1229,8 +1302,8 @@ function App() {
                         <button className="workspace-button workspace-button--outline" type="button" disabled={actionLabel !== null} onClick={() => void handleCreateIdentityWallet()}>Create wallet <ButtonArrow /></button>
                       </div>
                     )}
-                    <div className="workspace-action-row workspace-action-row--muted">
-                      <div><span className="panel-kicker">REPUTATION REWARDS</span><strong>Claim NFT rewards</strong><p>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol} currently attributable to this identity.</p></div>
+                     <div className="workspace-action-row workspace-action-row--muted">
+                       <div><span className="panel-kicker">REPUTATION REWARDS</span><strong>Claim NFT rewards</strong><p className="token-copy"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol} currently attributable to this identity.</span></p></div>
                       <button className="workspace-button workspace-button--outline" type="button" disabled={actionLabel !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n} onClick={() => void handleClaimNFTRewards()}>Claim <ButtonArrow /></button>
                     </div>
                   </div>
@@ -1263,18 +1336,18 @@ function App() {
                   <span className="workspace-panel__tag">{connected ? 'MONAD / 143' : 'CONNECT WALLET'}</span>
                 </div>
                 <div className="position-grid">
-                  <div className="position-cell position-cell--gold"><span>{symbol} BALANCE</span><strong>{tokenAmount(account.ser9Balance, stats.ser9Decimals)}</strong><small>{symbol}</small></div>
-                  <div className="position-cell"><span>{symbol} STAKED</span><strong>{tokenAmount(account.staked, stats.ser9Decimals)}</strong><small>{symbol}</small></div>
-                  <div className="position-cell"><span>STAKING EARNED</span><strong>{tokenAmount(account.stakingRewards, stats.ser9Decimals)}</strong><small>{symbol} claimable</small></div>
-                  <div className="position-cell position-cell--sand"><span>MON BALANCE</span><strong>{tokenAmount(account.monBalance, MONAD.nativeCurrency.decimals)}</strong><small>MON</small></div>
-                  <div className="position-cell"><span>MON STAKED</span><strong>{tokenAmount(account.monadStaked, MONAD.nativeCurrency.decimals)}</strong><small>MON</small></div>
-                  <div className="position-cell"><span>MON EARNED</span><strong>{tokenAmount(account.monadRewards, stats.ser9Decimals)}</strong><small>{symbol} reward</small></div>
+                   <div className="position-cell position-cell--gold"><span className="position-cell__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol} BALANCE</span></span><strong>{tokenAmount(account.ser9Balance, stats.ser9Decimals)}</strong><small>{symbol}</small></div>
+                   <div className="position-cell"><span className="position-cell__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol} STAKED</span></span><strong>{tokenAmount(account.staked, stats.ser9Decimals)}</strong><small>{symbol}</small></div>
+                   <div className="position-cell"><span className="position-cell__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>STAKING EARNED</span></span><strong>{tokenAmount(account.stakingRewards, stats.ser9Decimals)}</strong><small>{symbol} claimable</small></div>
+                   <div className="position-cell position-cell--sand"><span className="position-cell__label token-label"><TokenLogo token="MON" /><span>MON BALANCE</span></span><strong>{tokenAmount(account.monBalance, MONAD.nativeCurrency.decimals)}</strong><small>MON</small></div>
+                   <div className="position-cell"><span className="position-cell__label token-label"><TokenLogo token="MON" /><span>MON STAKED</span></span><strong>{tokenAmount(account.monadStaked, MONAD.nativeCurrency.decimals)}</strong><small>MON</small></div>
+                   <div className="position-cell"><span className="position-cell__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>MON EARNED</span></span><strong>{tokenAmount(account.monadRewards, stats.ser9Decimals)}</strong><small>{symbol} reward</small></div>
                 </div>
                 <div className="position-context">
-                  <div><span>PROTOCOL TOTAL / {symbol}</span><strong>{tokenAmount(stats.totalStaked, stats.ser9Decimals)} {symbol}</strong></div>
-                  <div><span>PROTOCOL TOTAL / MON</span><strong>{tokenAmount(stats.totalMonadStaked, MONAD.nativeCurrency.decimals)} MON</strong></div>
-                  <div><span>REWARD RATE / BLOCK</span><strong>{tokenAmount(stats.rewardRatePerBlock, stats.ser9Decimals, 4)} {symbol}</strong></div>
-                  <div><span>MON REWARD RATE / BLOCK</span><strong>{tokenAmount(stats.monadRewardRatePerBlock, stats.ser9Decimals, 4)} {symbol}</strong></div>
+                   <div><span className="position-context__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>PROTOCOL TOTAL / {symbol}</span></span><strong>{tokenAmount(stats.totalStaked, stats.ser9Decimals)} {symbol}</strong></div>
+                   <div><span className="position-context__label token-label"><TokenLogo token="MON" /><span>PROTOCOL TOTAL / MON</span></span><strong>{tokenAmount(stats.totalMonadStaked, MONAD.nativeCurrency.decimals)} MON</strong></div>
+                   <div><span className="position-context__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>REWARD RATE / BLOCK</span></span><strong>{tokenAmount(stats.rewardRatePerBlock, stats.ser9Decimals, 4)} {symbol}</strong></div>
+                   <div><span className="position-context__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>MON REWARD RATE / BLOCK</span></span><strong>{tokenAmount(stats.monadRewardRatePerBlock, stats.ser9Decimals, 4)} {symbol}</strong></div>
                 </div>
                 <a className="workspace-contract-link" href={explorerAddressUrl(CONTRACTS.staking)} target="_blank" rel="noreferrer">
                   View staking contract <ButtonArrow />
@@ -1287,37 +1360,57 @@ function App() {
                   <span className="workspace-panel__tag">{stakingAsset}</span>
                 </div>
                 <div className="asset-tabs" role="tablist" aria-label="Staking asset">
-                  <button type="button" role="tab" aria-selected={stakingAsset === 'SER9'} className={stakingAsset === 'SER9' ? 'is-selected' : ''} onClick={() => setStakingAsset('SER9')}>SER9</button>
-                  <button type="button" role="tab" aria-selected={stakingAsset === 'MON'} className={stakingAsset === 'MON' ? 'is-selected' : ''} onClick={() => setStakingAsset('MON')}>MON / native</button>
+                   <button type="button" role="tab" aria-selected={stakingAsset === 'SER9'} className={stakingAsset === 'SER9' ? 'is-selected' : ''} onClick={() => setStakingAsset('SER9')}><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>SER9</span></button>
+                   <button type="button" role="tab" aria-selected={stakingAsset === 'MON'} className={stakingAsset === 'MON' ? 'is-selected' : ''} onClick={() => setStakingAsset('MON')}><TokenLogo token="MON" /><span>MON / native</span></button>
                 </div>
 
                 {stakingAsset === 'SER9' ? (
                   <div className="staking-tab-panel" role="tabpanel">
-                    <form className="workspace-form" onSubmit={(event) => void handleStakeSer9(event)}>
-                      <label className="workspace-field workspace-field--amount">
-                        <span>Amount to move <i>available {tokenAmount(account.ser9Balance, stats.ser9Decimals)} {symbol}</i></span>
-                        <div className="amount-input-wrap"><input inputMode="decimal" value={stakingAmount} onChange={(event) => setStakingAmount(event.target.value)} placeholder="0.00" /><span>{symbol}</span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
-                      </label>
+                     <form className="workspace-form" onSubmit={(event) => void handleStakeSer9(event)}>
+                       <label className="workspace-field workspace-field--amount">
+                         <span>
+                           Amount to move
+                           <i className="token-label">
+                             <span>available {tokenAmount(account.ser9Balance, stats.ser9Decimals)} {symbol}</span>
+                             <TokenLogo token="SER9" imageUri={stats.ser9Image} />
+                           </i>
+                         </span>
+                          <div className="amount-input-wrap"><input inputMode="decimal" value={stakingAmount} onChange={(event) => setStakingAmount(event.target.value)} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol}</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
+                       </label>
                       <div className="workspace-action-grid">
                         <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null || !canStakeSelected}>Approve & stake <ButtonArrow /></button>
                         <button className="workspace-button workspace-button--ink" type="button" disabled={actionLabel !== null || !canUnstakeSelected} onClick={() => void handleUnstakeSer9()}>Request unstake <ButtonArrow /></button>
                       </div>
                     </form>
                     <div className="unstake-note"><span className="workspace-row-icon"><Icon name="lock" size={15} /></span><span><strong>Epoch delayed</strong><small>Unstake creates a request first. SER9 becomes claimable after the protocol delay.</small></span></div>
-                    <div className="request-control">
-                      <div><span className="panel-kicker">SER9 REQUESTS</span><small>{account.ser9UnstakeRequestCount === null ? 'Reading request count...' : `${account.ser9UnstakeRequestCount.toString()} request${account.ser9UnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
-                      <div className="request-control__form"><input inputMode="numeric" value={ser9RequestId} onChange={(event) => setSer9RequestId(event.target.value)} placeholder={account.ser9LatestUnstakeRequestId === null ? 'request id' : `latest ${account.ser9LatestUnstakeRequestId.toString()}`} aria-label="SER9 unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={actionLabel !== null || ser9ClaimRequestId === null} onClick={() => void handleClaimSer9Unstaked()}>Claim <ButtonArrow /></button></div>
-                      {account.ser9LatestUnstakeRequest && <small className="request-control__detail">Latest amount {tokenAmount(account.ser9LatestUnstakeRequest.amount, stats.ser9Decimals)} {symbol} / {unstakeRequestState(account.ser9LatestUnstakeRequest)}</small>}
-                      <small className="request-control__hint">Blank uses the latest request. It must have passed its minimum claim epoch.</small>
-                    </div>
-                    <button className="workspace-button workspace-button--outline workspace-button--full" type="button" disabled={actionLabel !== null || account.stakingRewards === null || account.stakingRewards === 0n} onClick={() => void handleClaimSer9Rewards()}>Claim earned rewards <span>{tokenAmount(account.stakingRewards, stats.ser9Decimals)} {symbol}</span> <ButtonArrow /></button>
+                     <div className="request-control">
+                       <div><span className="panel-kicker">SER9 REQUESTS</span><small>{account.ser9UnstakeRequestCount === null ? 'Reading request count...' : `${account.ser9UnstakeRequestCount.toString()} request${account.ser9UnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
+                       <div className="request-control__form"><input inputMode="numeric" value={ser9RequestId} onChange={(event) => setSer9RequestId(event.target.value)} placeholder={account.ser9LatestUnstakeRequestId === null ? 'request id' : `latest ${account.ser9LatestUnstakeRequestId.toString()}`} aria-label="SER9 unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={actionLabel !== null || ser9ClaimRequestId === null} onClick={() => void handleClaimSer9Unstaked()}>Claim <ButtonArrow /></button></div>
+                       {account.ser9LatestUnstakeRequest && (
+                         <small className="request-control__detail">
+                           <span className="token-value">
+                             <span>Latest amount {tokenAmount(account.ser9LatestUnstakeRequest.amount, stats.ser9Decimals)} {symbol}</span>
+                             <TokenLogo token="SER9" imageUri={stats.ser9Image} />
+                           </span>
+                           <span>/ {unstakeRequestState(account.ser9LatestUnstakeRequest)}</span>
+                         </small>
+                       )}
+                       <small className="request-control__hint">Blank uses the latest request. It must have passed its minimum claim epoch.</small>
+                     </div>
+                     <button className="workspace-button workspace-button--outline workspace-button--full" type="button" disabled={actionLabel !== null || account.stakingRewards === null || account.stakingRewards === 0n} onClick={() => void handleClaimSer9Rewards()}>Claim earned rewards <span className="token-value"><span>{tokenAmount(account.stakingRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></span> <ButtonArrow /></button>
                   </div>
                 ) : (
                   <div className="staking-tab-panel" role="tabpanel">
                      <form className="workspace-form" onSubmit={(event) => void handleStakeMonad(event)}>
                        <label className="workspace-field workspace-field--amount">
-                         <span>Amount to move <i>available {tokenAmount(spendableMonBalance, MONAD.nativeCurrency.decimals)} MON ({isMonGasReserveEstimated ? 'estimated' : 'fallback'} {tokenAmount(activeMonGasReserve, MONAD.nativeCurrency.decimals)} MON gas reserve)</i></span>
-                        <div className="amount-input-wrap"><input inputMode="decimal" value={stakingAmount} onChange={(event) => setStakingAmount(event.target.value)} placeholder="0.00" /><span>MON</span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
+                         <span>
+                           Amount to move
+                           <i className="token-label">
+                             <span>available {tokenAmount(spendableMonBalance, MONAD.nativeCurrency.decimals)} MON ({isMonGasReserveEstimated ? 'estimated' : 'fallback'} {tokenAmount(activeMonGasReserve, MONAD.nativeCurrency.decimals)} MON gas reserve)</span>
+                             <TokenLogo token="MON" />
+                           </i>
+                         </span>
+                          <div className="amount-input-wrap"><input inputMode="decimal" value={stakingAmount} onChange={(event) => setStakingAmount(event.target.value)} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="MON" /><span>MON</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
                       </label>
                       <div className="workspace-action-grid">
                         <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null || !canStakeSelected}>Stake MON <ButtonArrow /></button>
@@ -1325,10 +1418,18 @@ function App() {
                       </div>
                     </form>
                     <div className="unstake-note"><span className="workspace-row-icon"><Icon name="lock" size={15} /></span><span><strong>Native MON, epoch covered</strong><small>MON is delegated through Monad staking. Coverage and the epoch delay must clear before a claim can settle.</small></span></div>
-                    <div className="request-control">
-                      <div><span className="panel-kicker">MON REQUESTS</span><small>{account.monadUnstakeRequestCount === null ? 'Reading request count...' : `${account.monadUnstakeRequestCount.toString()} request${account.monadUnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
-                      <div className="request-control__form"><input inputMode="numeric" value={monadRequestId} onChange={(event) => setMonadRequestId(event.target.value)} placeholder={account.monadLatestUnstakeRequestId === null ? 'request id' : `latest ${account.monadLatestUnstakeRequestId.toString()}`} aria-label="MON unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={actionLabel !== null || monadClaimRequestId === null} onClick={() => void handleClaimMonadUnstaked()}>Claim <ButtonArrow /></button></div>
-                      {account.monadLatestUnstakeRequest && <small className="request-control__detail">Latest amount {tokenAmount(account.monadLatestUnstakeRequest.amount, MONAD.nativeCurrency.decimals)} MON / {unstakeRequestState(account.monadLatestUnstakeRequest)}</small>}
+                     <div className="request-control">
+                       <div><span className="panel-kicker">MON REQUESTS</span><small>{account.monadUnstakeRequestCount === null ? 'Reading request count...' : `${account.monadUnstakeRequestCount.toString()} request${account.monadUnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
+                       <div className="request-control__form"><input inputMode="numeric" value={monadRequestId} onChange={(event) => setMonadRequestId(event.target.value)} placeholder={account.monadLatestUnstakeRequestId === null ? 'request id' : `latest ${account.monadLatestUnstakeRequestId.toString()}`} aria-label="MON unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={actionLabel !== null || monadClaimRequestId === null} onClick={() => void handleClaimMonadUnstaked()}>Claim <ButtonArrow /></button></div>
+                       {account.monadLatestUnstakeRequest && (
+                         <small className="request-control__detail">
+                           <span className="token-value">
+                             <span>Latest amount {tokenAmount(account.monadLatestUnstakeRequest.amount, MONAD.nativeCurrency.decimals)} MON</span>
+                             <TokenLogo token="MON" />
+                           </span>
+                           <span>/ {unstakeRequestState(account.monadLatestUnstakeRequest)}</span>
+                         </small>
+                       )}
                       <small className="request-control__hint">Blank uses the latest request. The protocol must have covered its undelegation.</small>
                     </div>
                     <div className="workspace-rail-note">MON staking sends native value with the `stakeMonad()` call. Gas reserve is estimated when the wallet allows it; otherwise a conservative fallback is used.</div>
@@ -1434,13 +1535,30 @@ function App() {
                   <span className="activity-live"><i /> {stats.error ? 'stale' : 'live'}</span>
                 </div>
                 <div className="activity-list">
-                  {activity.slice(0, showAllActivity ? activity.length : 3).map((item) => (
-                    <div className="activity-row" key={item.type}>
-                      <span className="activity-row__icon"><Icon name={item.icon} size={17} /></span>
-                      <span className="activity-row__copy"><strong>{item.type}</strong><small>{item.detail}</small></span>
-                      <span className="activity-row__value"><strong>{item.amount}</strong><small>{item.time}</small></span>
-                    </div>
-                  ))}
+                   {activity.slice(0, showAllActivity ? activity.length : 3).map((item) => (
+                     <div className="activity-row" key={item.type}>
+                       <span className="activity-row__icon"><Icon name={item.icon} size={17} /></span>
+                       <span className="activity-row__copy"><strong>{item.type}</strong><small>{item.detail}</small></span>
+                       <span className="activity-row__value">
+                         {item.token ? (
+                           <strong className="token-value">
+                             <span>{item.amount}</span>
+                             <TokenLogo token={item.token} imageUri={item.token === 'SER9' ? stats.ser9Image : undefined} />
+                           </strong>
+                         ) : (
+                           <strong>{item.amount}</strong>
+                         )}
+                         {item.timeToken ? (
+                           <small className="token-value">
+                             <span>{item.time}</span>
+                             <TokenLogo token={item.timeToken} imageUri={item.timeToken === 'SER9' ? stats.ser9Image : undefined} />
+                           </small>
+                         ) : (
+                           <small>{item.time}</small>
+                         )}
+                       </span>
+                     </div>
+                   ))}
                 </div>
                 <button className="activity-more" type="button" aria-expanded={showAllActivity} onClick={() => setShowAllActivity((isOpen) => !isOpen)}>
                   {showAllActivity ? 'Show less' : 'View all readings'} <ButtonArrow />
@@ -1489,7 +1607,8 @@ function App() {
               S9ID {shortenAddress(CONTRACTS.identity)}
             </a>
             <a href={explorerAddressUrl(CONTRACTS.ser9)} target="_blank" rel="noreferrer">
-              {symbol} {shortenAddress(CONTRACTS.ser9)}
+              <TokenLogo token="SER9" imageUri={stats.ser9Image} />
+              <span>{symbol} {shortenAddress(CONTRACTS.ser9)}</span>
             </a>
             <span>MONAD MAINNET / {MONAD.id}</span>
           </div>

@@ -1,0 +1,24 @@
+{
+  "name": "SERIES9 - Identity in motion",
+  "short_name": "SERIES9",
+  "description": "The identity layer for a more personal onchain economy on Monad.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "browser",
+  "background_color": "#0a0a09",
+  "theme_color": "#0a0a09",
+  "icons": [
+    {
+      "src": "./icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

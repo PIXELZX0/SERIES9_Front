@@ -33,9 +33,12 @@ export const SELECTOR = {
   image: '0xf3ccaac0',
   description: '0x7284e416',
   ownerTokenId: '0x27329fea',
+  owner: '0x8da5cb5b',
+  moderators: '0x14d0f1ba',
   walletOf: '0xe0fa88e1',
   handleOf: '0x49491987',
   ownerOf: '0x6352211e',
+  tokenURI: '0xc87b56dd',
   hasIdentity: '0x237f1a21',
   isVerified: '0x37b6d96b',
   nameOf: '0xf5c57382',
@@ -63,6 +66,8 @@ export const SELECTOR = {
   mintIdentityWithHandle: '0x77c3c628',
   createWallet: '0x7a675bb6',
   setHandle: '0xa6e6178d',
+  verify: '0x3e7cb0d3',
+  setReputationScore: '0x36a659e3',
   earned: '0x008cc262',
   monadEarned: '0x30104a83',
   monadStakedBalance: '0xc639cb69',
@@ -137,6 +142,12 @@ export function encodeUint8(value: AbiUint): string {
   return normalized.toString(16).padStart(64, '0');
 }
 
+/** Encode a Solidity bool as one ABI word, rejecting non-boolean inputs. */
+export function encodeBool(value: boolean): string {
+  if (typeof value !== 'boolean') throw new Error('ABI bool values must be boolean.');
+  return encodeUint(value ? 1n : 0n);
+}
+
 /** Encode an address as one ABI word, rejecting malformed calldata inputs. */
 export function encodeAddress(address: string): string {
   if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error('Invalid EVM address.');
@@ -183,6 +194,14 @@ export function callWithAddressAndUint(to: string, selector: string, address: st
 /** `selector(uint256)`. */
 export function callWithUint(to: string, selector: string, value: bigint): RpcCall {
   return ethCall(to, encodeCall(selector, [encodeUint(value)]));
+}
+
+export function encodeOwner(): string {
+  return encodeCall(SELECTOR.owner);
+}
+
+export function encodeModerators(address: string): string {
+  return encodeCall(SELECTOR.moderators, [encodeAddress(address)]);
 }
 
 export function encodeApprove(spender: string, amount: bigint): string {
@@ -274,6 +293,14 @@ export function encodeCreateWallet(tokenId: bigint): string {
 export function encodeSetHandle(tokenId: bigint, handle: string): string {
   const handleTail = encodeDynamicString(handle);
   return encodeCall(SELECTOR.setHandle, [encodeUint(tokenId), encodeUint(64), handleTail]);
+}
+
+export function encodeVerify(tokenId: AbiUint, status: boolean): string {
+  return encodeCall(SELECTOR.verify, [encodeUint(tokenId), encodeBool(status)]);
+}
+
+export function encodeSetReputationScore(tokenId: AbiUint, newScore: AbiUint): string {
+  return encodeCall(SELECTOR.setReputationScore, [encodeUint(tokenId), encodeUint(newScore)]);
 }
 
 export function encodeClaimNFTRewards(): string {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
   CONTRACTS,
   MONAD,
@@ -11,10 +11,12 @@ import {
   encodeMintIdentity,
   encodeMintIdentityWithHandle,
   encodeRequestUnstakeMonad,
+  encodeSetReputationScore,
   encodeSetHandle,
   encodeStake,
   encodeStakeMonad,
   encodeUnstake,
+  encodeVerify,
   explorerAddressUrl,
   formatCompact,
   formatUnits,
@@ -24,9 +26,9 @@ import { useWallet } from './useWallet.ts';
 import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from './useProtocol.ts';
 
 type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'wallet';
-type SectionId = 'overview' | 'identity' | 'staking' | 'pulse';
-type SiteRoute = '/' | '/identity' | '/staking';
-type Page = 'home' | 'identity' | 'staking';
+type SectionId = 'overview' | 'identity' | 'staking' | 'moderator' | 'pulse';
+type SiteRoute = '/' | '/identity' | '/staking' | '/moderator';
+type Page = 'home' | 'identity' | 'staking' | 'moderator';
 type TokenKind = 'SER9' | 'MON';
 type StakingAsset = TokenKind;
 type ToastKind = 'success' | 'error';
@@ -79,7 +81,7 @@ function gweiFromWei(value: bigint | null): string {
 }
 
 function parseUnitsInput(value: string, decimals: number): bigint | null {
-  const normalized = value.trim();
+  const normalized = value.trim().replace(/,/g, '');
   if (!/^\d*(?:\.\d*)?$/.test(normalized) || normalized === '' || normalized === '.') return null;
 
   const [whole = '0', fraction = ''] = normalized.split('.');
@@ -92,12 +94,36 @@ function parseUnitsInput(value: string, decimals: number): bigint | null {
   }
 }
 
+function formatStakingInput(value: string): string {
+  const normalized = value.replace(/,/g, '');
+  if (!/^\d*(?:\.\d*)?$/.test(normalized)) return value;
+
+  const [whole = '', fraction] = normalized.split('.');
+  const groupedWhole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return fraction === undefined ? groupedWhole : `${groupedWhole}.${fraction}`;
+}
+
 function formatInputUnits(value: bigint, decimals: number): string {
   const base = 10n ** BigInt(decimals);
   const whole = value / base;
   const fraction = value % base;
-  if (fraction === 0n) return whole.toString();
-  return `${whole}.${fraction.toString().padStart(decimals, '0').replace(/0+$/, '')}`;
+  const rawValue = fraction === 0n
+    ? whole.toString()
+    : `${whole}.${fraction.toString().padStart(decimals, '0').replace(/0+$/, '')}`;
+  return formatStakingInput(rawValue);
+}
+
+function getFormattedCaretPosition(value: string, formattedValue: string, selectionStart: number | null): number {
+  const charactersBeforeCursor = value.slice(0, selectionStart ?? value.length).replace(/,/g, '').length;
+  if (charactersBeforeCursor === 0) return 0;
+
+  let charactersCounted = 0;
+  for (let index = 0; index < formattedValue.length; index += 1) {
+    if (formattedValue[index] !== ',') charactersCounted += 1;
+    if (charactersCounted >= charactersBeforeCursor) return index + 1;
+  }
+
+  return formattedValue.length;
 }
 
 const LOCAL_TOKEN_LOGOS: Record<TokenKind, string> = {
@@ -114,6 +140,46 @@ function normalizeTokenImageUri(value: string | null | undefined): string | null
 
   const path = uri.replace(/^ipfs:\/\//i, '').replace(/^ipfs\//i, '');
   return path ? `https://ipfs.io/ipfs/${path}` : null;
+}
+
+function IdentityNftArtwork({
+  imageUri,
+  alt,
+  className = '',
+  decorative = false,
+}: {
+  imageUri: string | null | undefined;
+  alt: string;
+  className?: string;
+  decorative?: boolean;
+}) {
+  const source = normalizeTokenImageUri(imageUri);
+  const [failedImageSources, setFailedImageSources] = useState<string[]>([]);
+  const imageSource = source !== null && !failedImageSources.includes(source) ? source : null;
+  const rootClassName = `identity-artwork${className ? ` ${className}` : ''}${imageSource ? ' identity-artwork--image' : ' identity-artwork--fallback'}`;
+
+  return (
+    <div className={rootClassName} aria-hidden={decorative || undefined}>
+      {imageSource ? (
+        <img
+          src={imageSource}
+          alt={decorative ? '' : alt}
+          onError={() => setFailedImageSources((failed) => failed.includes(imageSource) ? failed : [...failed, imageSource])}
+        />
+      ) : (
+        <span
+          className="identity-artwork__fallback"
+          role={decorative ? undefined : 'img'}
+          aria-label={decorative ? undefined : alt}
+          aria-hidden={decorative || undefined}
+        >
+          <span className="monogram-ring monogram-ring--back" aria-hidden="true" />
+          <span className="monogram-ring monogram-ring--front" aria-hidden="true" />
+          <span className="monogram-nine" aria-hidden="true">9</span>
+        </span>
+      )}
+    </div>
+  );
 }
 
 function TokenLogo({
@@ -167,6 +233,18 @@ function parseRequestId(value: string, latest: bigint | null): bigint | null {
   }
 }
 
+function parseUnsignedInteger(value: string): bigint | null {
+  const normalized = value.trim().replace(/,/g, '');
+  if (!/^\d+$/.test(normalized)) return null;
+
+  try {
+    const parsed = BigInt(normalized);
+    return parsed < 2n ** 256n ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function identityTypeLabel(value: bigint | null): string {
   if (value === null) return PENDING;
   return value === 0n ? 'Human' : value === 1n ? 'AI' : `Type ${value.toString()}`;
@@ -197,6 +275,7 @@ function currentPage(pathname = window.location.pathname): Page {
 
   if (normalizedPath === '/identity') return 'identity';
   if (normalizedPath === '/staking') return 'staking';
+  if (normalizedPath === '/moderator') return 'moderator';
   return 'home';
 }
 
@@ -204,6 +283,7 @@ const navLinks: Array<{ label: string; href: string; id: SectionId }> = [
   { label: 'Overview', href: routeHref('/', '#overview'), id: 'overview' },
   { label: 'Identity', href: routeHref('/identity'), id: 'identity' },
   { label: 'Staking', href: routeHref('/staking'), id: 'staking' },
+  { label: 'Moderator', href: routeHref('/moderator'), id: 'moderator' },
   { label: 'Pulse', href: routeHref('/', '#pulse'), id: 'pulse' },
 ];
 
@@ -536,6 +616,10 @@ function App() {
   const [toast, setToast] = useState<{ message: string; kind: ToastKind } | null>(null);
   const [activeSection, setActiveSection] = useState<SectionId>('overview');
   const [actionLabel, setActionLabel] = useState<string | null>(null);
+  const [moderatorTokenId, setModeratorTokenId] = useState('');
+  const [moderatorVerification, setModeratorVerification] = useState<'verified' | 'unverified'>('verified');
+  const [reputationTokenId, setReputationTokenId] = useState('');
+  const [reputationScore, setReputationScore] = useState('');
   const [mintName, setMintName] = useState('');
   const [mintBio, setMintBio] = useState('');
   const [mintHandle, setMintHandle] = useState('');
@@ -548,6 +632,8 @@ function App() {
   const [monGasReserve, setMonGasReserve] = useState(MON_NATIVE_GAS_RESERVE);
   const [monGasReserveSource, setMonGasReserveSource] = useState<'estimated' | 'fallback'>('fallback');
   const [monGasReserveAddress, setMonGasReserveAddress] = useState<string | null>(null);
+  const stakingAmountInputRef = useRef<HTMLInputElement>(null);
+  const stakingAmountCaretRef = useRef<number | null>(null);
   const menuToggleRef = useRef<HTMLButtonElement>(null);
   const navRef = useRef<HTMLElement>(null);
 
@@ -557,12 +643,43 @@ function App() {
   const account = useAccount(wallet.address, stats.blockNumber);
 
   const connected = wallet.address !== null;
+  const moderatorAccess = account.identityModerator === true;
+  const moderatorPermissionLoading = connected && account.loading;
+  const moderatorAccessState: 'disconnected' | 'loading' | 'authorized' | 'denied' | 'unavailable' = !connected
+    ? 'disconnected'
+    : moderatorPermissionLoading
+      ? 'loading'
+      : moderatorAccess
+        ? 'authorized'
+        : account.identityModerator === null
+          ? 'unavailable'
+          : 'denied';
+  const moderatorPermissionLabel = moderatorAccessState === 'disconnected'
+    ? 'Wallet not connected'
+    : moderatorAccessState === 'loading'
+      ? 'Checking Identity permission'
+      : moderatorAccessState === 'authorized'
+        ? 'Permission confirmed'
+        : moderatorAccessState === 'unavailable'
+          ? 'Permission check unavailable'
+          : 'Access denied';
+  const moderatorRole = moderatorAccessState === 'loading'
+    ? 'Verifying onchain role'
+    : account.identityOwner === true
+      ? 'Protocol owner'
+      : moderatorAccess
+        ? 'Identity moderator'
+        : connected
+          ? 'No moderator role'
+          : 'Connect wallet to check';
+  const visibleNavLinks = navLinks.filter((link) => link.id !== 'moderator' || moderatorAccess);
   const symbol = stats.ser9Symbol ?? 'SER9';
   const features = buildFeatures(stats);
   const activity = buildActivity(stats, account, connected);
   const chartValues = normalizeSeries(stats.gasSeries);
   const chart = buildChartPaths(chartValues);
   const selectedDecimals = stakingAsset === 'SER9' ? stats.ser9Decimals : MONAD.nativeCurrency.decimals;
+  const networkState = stats.error ? 'degraded' : stats.loading ? 'loading' : 'operational';
   const activeMonGasReserve = wallet.address && wallet.onMonad && monGasReserveAddress === wallet.address
     ? monGasReserve
     : MON_NATIVE_GAS_RESERVE;
@@ -576,6 +693,9 @@ function App() {
   const selectedBalance = stakingAsset === 'SER9' ? account.ser9Balance : spendableMonBalance;
   const selectedStaked = stakingAsset === 'SER9' ? account.staked : account.monadStaked;
   const selectedAmount = parseUnitsInput(stakingAmount, selectedDecimals);
+  const identityArtworkAlt = account.tokenId === null
+    ? 'SERIES9 identity artwork preview'
+    : `Identity NFT #${account.tokenId.toString()} artwork`;
   const mintFee = mintEntityType === 'human' ? stats.humanMintFee : stats.aiMintFee;
   const mintFeeInsufficient =
     connected && mintFee !== null && account.ser9Balance !== null && account.ser9Balance < mintFee;
@@ -648,6 +768,15 @@ function App() {
     return () => window.clearTimeout(timeoutId);
   }, [toast]);
 
+  useLayoutEffect(() => {
+    const input = stakingAmountInputRef.current;
+    const caretPosition = stakingAmountCaretRef.current;
+    if (!input || caretPosition === null) return;
+
+    input.setSelectionRange(caretPosition, caretPosition);
+    stakingAmountCaretRef.current = null;
+  }, [stakingAmount]);
+
   useEffect(() => {
     if (!menuOpen) return;
 
@@ -671,6 +800,17 @@ function App() {
 
   function announceError(message: string) {
     announce(message, 'error');
+  }
+
+  function handleStakingAmountChange(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const formattedValue = formatStakingInput(input.value);
+    const caretPosition = getFormattedCaretPosition(input.value, formattedValue, input.selectionStart);
+
+    stakingAmountCaretRef.current = formattedValue === stakingAmount ? null : caretPosition;
+    input.value = formattedValue;
+    input.setSelectionRange(caretPosition, caretPosition);
+    setStakingAmount(formattedValue);
   }
 
   function handleNavClick() {
@@ -832,6 +972,53 @@ function App() {
     });
   }
 
+  async function handleModeratorVerification(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!moderatorAccess) {
+      announceError('Moderator permission is not confirmed for this wallet.');
+      return;
+    }
+
+    const tokenId = parseUnsignedInteger(moderatorTokenId);
+    if (tokenId === null || tokenId === 0n) {
+      announceError('Enter a token ID greater than 0.');
+      return;
+    }
+    if (!(await requireMonadWallet())) return;
+
+    const action = moderatorVerification === 'verified' ? 'Verify' : 'Unverify';
+    await sendAndWait(`${action} identity #${tokenId.toString()}`, {
+      to: CONTRACTS.identity,
+      data: encodeVerify(tokenId, moderatorVerification === 'verified'),
+    });
+  }
+
+  async function handleSetReputationScore(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!moderatorAccess) {
+      announceError('Moderator permission is not confirmed for this wallet.');
+      return;
+    }
+
+    const tokenId = parseUnsignedInteger(reputationTokenId);
+    if (tokenId === null || tokenId === 0n) {
+      announceError('Enter a token ID greater than 0.');
+      return;
+    }
+
+    const score = parseUnsignedInteger(reputationScore);
+    if (score === null || score < 1n || score > 1_000_000n) {
+      announceError('Reputation score must be an integer from 1 to 1,000,000.');
+      return;
+    }
+    if (!(await requireMonadWallet())) return;
+
+    await sendAndWait(`Set reputation #${tokenId.toString()}`, {
+      to: CONTRACTS.identity,
+      data: encodeSetReputationScore(tokenId, score),
+    });
+  }
+
   function readActionAmount(decimals: number, balance: bigint | null, action: string): bigint | null {
     const amount = parseUnitsInput(stakingAmount, decimals);
     if (amount === null || amount === 0n) {
@@ -970,8 +1157,8 @@ function App() {
             <span className="brand__name">SERIES9</span>
           </a>
 
-          <nav ref={navRef} className={`primary-nav${menuOpen ? ' is-open' : ''}`} id="primary-navigation" aria-label="Primary navigation">
-            {navLinks.map((link) => (
+           <nav ref={navRef} className={`primary-nav${menuOpen ? ' is-open' : ''}`} id="primary-navigation" aria-label="Primary navigation">
+             {visibleNavLinks.map((link) => (
               <a
                 className={isNavLinkActive(link.id) ? 'is-active' : ''}
                 href={link.href}
@@ -986,8 +1173,9 @@ function App() {
 
           <div className="site-header__actions">
             <button
-              className="network-status"
+              className={`network-status network-status--${networkState}`}
               type="button"
+              title="View Monad network status"
               onClick={() =>
                 announce(
                   stats.error
@@ -996,6 +1184,7 @@ function App() {
                 )
               }
             >
+              <Icon name="cubes" size={14} />
               <span className="network-status__dot" />
               <span>Monad</span>
               <span className="network-status__number">
@@ -1075,7 +1264,9 @@ function App() {
               </div>
               <div className="hero__meta">
                 <span>
-                  <span className="meta-check"><Icon name="check" size={13} /></span>{' '}
+                  <span className={`meta-check meta-check--${networkState}`}>
+                    <Icon name={networkState === 'degraded' ? 'bolt' : networkState === 'loading' ? 'orbit' : 'check'} size={13} />
+                  </span>{' '}
                   {stats.error ? 'RPC unreachable' : stats.loading ? 'Reading mainnet…' : 'Live on mainnet'}
                 </span>
                 <span className="hero__meta-divider" />
@@ -1100,11 +1291,7 @@ function App() {
                     {account.tokenId === null ? (connected ? 'NO IDENTITY' : 'NOT CONNECTED') : account.verified ? 'VERIFIED' : 'AUTHENTIC'}
                   </span>
                 </div>
-                <div className="identity-card__monogram">
-                  <span className="monogram-ring monogram-ring--back" aria-hidden="true" />
-                  <span className="monogram-ring monogram-ring--front" aria-hidden="true" />
-                  <span className="monogram-nine">9</span>
-                </div>
+                <IdentityNftArtwork imageUri={account.identityImage} alt={identityArtworkAlt} className="identity-card__monogram" />
                 <div className="identity-card__name">
                   <span className="identity-card__label">ONCHAIN HANDLE</span>
                   <strong>
@@ -1158,7 +1345,7 @@ function App() {
           <div className="hero__footer-line container"><span>scroll to enter</span><span className="hero__footer-arrow" aria-hidden="true">↓</span><span>09—∞</span></div>
             </section>
 
-            <section className="signal-strip" aria-label="Live protocol signals">
+            <section className={`signal-strip signal-strip--${networkState}`} aria-label="Live protocol signals">
           <div className="container signal-strip__grid">
             <div className="signal-strip__intro"><span className="signal-strip__pulse" /> LIVE SIGNAL</div>
             <div className="signal-metric">
@@ -1176,7 +1363,7 @@ function App() {
               <strong>{stats.identityCount === null ? PENDING : stats.identityCount.toLocaleString('en-US')}</strong>
               <small>minted</small>
             </div>
-            <div className="signal-metric signal-metric--status">
+            <div className={`signal-metric signal-metric--status signal-metric--${networkState}`}>
               <span>NETWORK STATUS</span>
               <strong><i /> {stats.error ? 'Degraded' : stats.loading ? 'Connecting' : 'Operational'}</strong>
               <small>{stats.error ? 'RPC unreachable' : `Block ${stats.blockNumber?.toLocaleString('en-US') ?? PENDING}`}</small>
@@ -1255,16 +1442,23 @@ function App() {
                     <a className="workspace-text-link" href="#identity-form">Start the mint flow <ButtonArrow /></a>
                   </div>
                 ) : (
-                  <div className="identity-summary">
-                    <div className="identity-summary__hero">
-                      <div className="identity-summary__monogram"><span>9</span></div>
-                      <div>
-                        <span className="panel-kicker">S9ID / TOKEN {account.tokenId.toString().padStart(4, '0')}</span>
-                        <h3>{account.name || 'Unnamed identity'}</h3>
-                        <p>{account.handle ? `@${account.handle}` : 'No payment handle registered'}</p>
-                      </div>
-                    </div>
-                    <dl className="identity-summary__facts">
+                   <div className="identity-summary">
+                     <div className="identity-summary__hero">
+                       <IdentityNftArtwork imageUri={account.identityImage} alt={identityArtworkAlt} className="identity-summary__monogram" decorative />
+                       <div>
+                         <span className="panel-kicker">S9ID / TOKEN {account.tokenId.toString().padStart(4, '0')}</span>
+                         <h3>{account.name || 'Unnamed identity'}</h3>
+                         <p>{account.handle ? `@${account.handle}` : 'No payment handle registered'}</p>
+                       </div>
+                     </div>
+                     <div className="identity-summary__preview">
+                       <div className="identity-summary__preview-header">
+                         <span>ONCHAIN ARTWORK</span>
+                         <span>ERC-721 / 720 x 440</span>
+                       </div>
+                       <IdentityNftArtwork imageUri={account.identityImage} alt={identityArtworkAlt} className="identity-summary__artwork" />
+                     </div>
+                     <dl className="identity-summary__facts">
                       <div><dt>ENTITY</dt><dd>{identityTypeLabel(account.entityType)}</dd></div>
                       <div><dt>VERIFIED</dt><dd>{account.verified === null ? PENDING : account.verified ? 'Yes' : 'No'}</dd></div>
                       <div><dt>REPUTATION</dt><dd>{account.reputation === null ? PENDING : account.reputation.toLocaleString('en-US')}</dd></div>
@@ -1369,8 +1563,8 @@ function App() {
           </section>
         )}
 
-        {page === 'staking' && (
-          <section className="workspace-section workspace-section--staking" aria-labelledby="staking-workspace-title">
+         {page === 'staking' && (
+           <section className="workspace-section workspace-section--staking" aria-labelledby="staking-workspace-title">
           <div className="container">
             <div className="workspace-heading">
               <div>
@@ -1390,7 +1584,11 @@ function App() {
               <article className="workspace-panel position-panel">
                 <div className="workspace-panel__header">
                   <div><span className="panel-kicker">LIVE POSITION</span><strong>Your conviction</strong></div>
-                  <span className="workspace-panel__tag">{connected ? 'MONAD / 143' : 'CONNECT WALLET'}</span>
+                  <span className="workspace-panel__tag">
+                    {connected
+                      ? `MONAD / ${stats.blockNumber === null ? 'SYNC' : (stats.blockNumber % 1000n).toString().padStart(3, '0')}`
+                      : 'CONNECT WALLET'}
+                  </span>
                 </div>
                 <div className="position-grid">
                    <div className="position-cell position-cell--gold"><span className="position-cell__label token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol} BALANCE</span></span><strong>{tokenAmount(account.ser9Balance, stats.ser9Decimals)}</strong><small>{symbol}</small></div>
@@ -1432,7 +1630,7 @@ function App() {
                              <TokenLogo token="SER9" imageUri={stats.ser9Image} />
                            </i>
                          </span>
-                          <div className="amount-input-wrap"><input inputMode="decimal" value={stakingAmount} onChange={(event) => setStakingAmount(event.target.value)} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol}</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
+                           <div className="amount-input-wrap"><input ref={stakingAmountInputRef} inputMode="decimal" value={stakingAmount} onChange={handleStakingAmountChange} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol}</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
                        </label>
                       <div className="workspace-action-grid">
                         <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null || !canStakeSelected}>Approve & stake <ButtonArrow /></button>
@@ -1467,7 +1665,7 @@ function App() {
                              <TokenLogo token="MON" />
                            </i>
                          </span>
-                          <div className="amount-input-wrap"><input inputMode="decimal" value={stakingAmount} onChange={(event) => setStakingAmount(event.target.value)} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="MON" /><span>MON</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
+                           <div className="amount-input-wrap"><input ref={stakingAmountInputRef} inputMode="decimal" value={stakingAmount} onChange={handleStakingAmountChange} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="MON" /><span>MON</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
                       </label>
                       <div className="workspace-action-grid">
                         <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null || !canStakeSelected}>Stake MON <ButtonArrow /></button>
@@ -1495,10 +1693,191 @@ function App() {
               </article>
             </div>
           </div>
-          </section>
-        )}
+           </section>
+         )}
 
-        {isHomePage && (
+         {page === 'moderator' && (
+           <section className="workspace-section workspace-section--moderator" aria-labelledby="moderator-workspace-title">
+           <div className="container">
+             <div className="workspace-heading">
+               <div>
+                 <p className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />MODERATOR WORKSPACE</p>
+                 <h2 id="moderator-workspace-title">Keep the signal<br /><em>credible.</em></h2>
+               </div>
+               <p>Identity moderation is deliberately narrow: confirm an identity and tune its reputation signal, with every change signed on Monad.</p>
+             </div>
+
+             {actionLabel && (
+               <div className="workspace-status" role="status" aria-live="polite">
+                 <span className="workspace-status__pulse" />{actionLabel}
+               </div>
+             )}
+
+             {connected && !wallet.onMonad && (
+               <div className="workspace-banner">
+                 <span><strong>Wrong network.</strong> Moderator writes are available on {MONAD.name} only.</span>
+                 <button className="workspace-button workspace-button--small" type="button" onClick={() => void handleSwitchNetwork()}>
+                   Switch to Monad <ButtonArrow />
+                 </button>
+               </div>
+             )}
+
+             <div className="moderator-grid moderator-grid--access">
+               <article className="workspace-panel moderator-panel moderator-access-panel">
+                 <div className="workspace-panel__header">
+                   <div><span className="panel-kicker">IDENTITY AUTHORITY</span><strong>Permission checkpoint</strong></div>
+                   <span className={`workspace-panel__tag moderator-tag--${moderatorAccessState}`}>{moderatorPermissionLabel}</span>
+                 </div>
+                 <div className="moderator-access-panel__body">
+                    <div
+                      className={`moderator-access-state moderator-access-state--${moderatorAccessState}`}
+                      role="status"
+                      aria-live="polite"
+                      aria-atomic="true"
+                    >
+                     <span className="moderator-access-state__icon">
+                       <Icon name={moderatorAccessState === 'authorized' ? 'check' : moderatorAccessState === 'loading' ? 'orbit' : 'lock'} size={20} />
+                     </span>
+                     <div>
+                       <span className="panel-kicker">PERMISSION CHECK</span>
+                       <strong>{moderatorPermissionLabel}</strong>
+                       <p>
+                          {moderatorAccessState === 'authorized'
+                            ? 'Permission confirmed. The moderator write forms are now available below.'
+                           : moderatorAccessState === 'loading'
+                             ? 'Reading owner() and moderators(address) from Series9Identity.'
+                             : moderatorAccessState === 'disconnected'
+                               ? 'Connect a wallet to verify its Identity role on Monad.'
+                               : moderatorAccessState === 'unavailable'
+                                 ? 'The role read did not return a safe answer. No moderator controls are available.'
+                                 : 'This wallet is not the Identity owner or an assigned moderator.'}
+                       </p>
+                     </div>
+                   </div>
+                   <dl className="moderator-facts">
+                     <div><dt>ROLE</dt><dd>{moderatorRole}</dd></div>
+                     <div><dt>CONNECTED ADDRESS</dt><dd className="moderator-facts__address">{wallet.address ?? 'Wallet not connected'}</dd></div>
+                     <div><dt>IDENTITY CONTRACT</dt><dd>{shortenAddress(CONTRACTS.identity)}</dd></div>
+                   </dl>
+                   <div className="moderator-access-panel__footer">
+                     <a className="workspace-contract-link" href={explorerAddressUrl(CONTRACTS.identity)} target="_blank" rel="noreferrer">
+                       View Identity contract <ButtonArrow />
+                     </a>
+                     {!connected && (
+                       <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting} onClick={() => void handleConnectWallet()}>
+                         {wallet.connecting ? 'Connecting...' : 'Connect wallet'} <ButtonArrow />
+                       </button>
+                     )}
+                     {connected && !wallet.onMonad && (
+                       <button className="workspace-button workspace-button--outline" type="button" onClick={() => void handleSwitchNetwork()}>
+                         Switch network <ButtonArrow />
+                       </button>
+                     )}
+                   </div>
+                 </div>
+               </article>
+
+               <article className="workspace-panel moderator-panel moderator-scope-panel">
+                 <div className="workspace-panel__header">
+                   <div><span className="panel-kicker">AUTHORITY SURFACE</span><strong>Two writes only</strong></div>
+                   <Icon name="lock" size={19} />
+                 </div>
+                 <div className="moderator-scope">
+                   <div className="moderator-scope__item">
+                     <span className="moderator-scope__number">01 / VERIFY</span>
+                     <strong>Identity status</strong>
+                     <p>Set an identity token's verification flag without touching ownership or mint configuration.</p>
+                   </div>
+                   <div className="moderator-scope__item">
+                     <span className="moderator-scope__number">02 / REPUTATION</span>
+                     <strong>Reputation score</strong>
+                     <p>Set a token score from 1 to 1,000,000. The value remains an onchain protocol signal.</p>
+                   </div>
+                   <div className="moderator-scope__note"><span className="detail-dot" />Owner administration, fees, pauses, and moderator assignment are not exposed here.</div>
+                 </div>
+               </article>
+             </div>
+
+             {moderatorAccess ? (
+               <div className="moderator-grid moderator-grid--controls">
+                 <article className="workspace-panel moderator-panel moderator-control-panel">
+                   <div className="workspace-panel__header">
+                     <div><span className="panel-kicker">MODERATOR WRITE / 01</span><strong>Verify an identity</strong></div>
+                     <span className="workspace-panel__tag">VERIFY</span>
+                   </div>
+                   <form className="workspace-form moderator-form" onSubmit={(event) => void handleModeratorVerification(event)}>
+                     <label className="workspace-field">
+                       <span>Token ID <i>uint256</i></span>
+                       <input inputMode="numeric" value={moderatorTokenId} onChange={(event) => setModeratorTokenId(event.target.value)} placeholder="e.g. 42" aria-label="Token ID for verification" />
+                     </label>
+                     <div className="workspace-field">
+                       <span>Verification status <i>moderator write</i></span>
+                       <div className="segmented-control moderator-status-control" role="group" aria-label="Verification status">
+                         <button type="button" className={moderatorVerification === 'verified' ? 'is-selected' : ''} aria-pressed={moderatorVerification === 'verified'} onClick={() => setModeratorVerification('verified')}>Verify</button>
+                         <button type="button" className={moderatorVerification === 'unverified' ? 'is-selected' : ''} aria-pressed={moderatorVerification === 'unverified'} onClick={() => setModeratorVerification('unverified')}>Unverify</button>
+                       </div>
+                     </div>
+                     <p className="workspace-form__note">Calls <code>verify(tokenId, status)</code> on Series9Identity. This does not change ownership.</p>
+                     <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null}>
+                       {actionLabel ?? `${moderatorVerification === 'verified' ? 'Verify' : 'Unverify'} identity`} <ButtonArrow />
+                     </button>
+                   </form>
+                 </article>
+
+                 <article className="workspace-panel moderator-panel moderator-control-panel">
+                   <div className="workspace-panel__header">
+                     <div><span className="panel-kicker">MODERATOR WRITE / 02</span><strong>Set reputation</strong></div>
+                     <span className="workspace-panel__tag">1 — 1M</span>
+                   </div>
+                   <form className="workspace-form moderator-form" onSubmit={(event) => void handleSetReputationScore(event)}>
+                     <label className="workspace-field">
+                       <span>Token ID <i>uint256</i></span>
+                       <input inputMode="numeric" value={reputationTokenId} onChange={(event) => setReputationTokenId(event.target.value)} placeholder="e.g. 42" aria-label="Token ID for reputation" />
+                     </label>
+                     <label className="workspace-field">
+                       <span>Reputation score <i>1 — 1,000,000</i></span>
+                       <input inputMode="numeric" value={reputationScore} onChange={(event) => setReputationScore(event.target.value)} placeholder="e.g. 750,000" aria-label="Reputation score" min="1" max="1000000" />
+                     </label>
+                     <p className="workspace-form__note">Scores are checked in the browser before <code>setReputationScore(tokenId, newScore)</code> is signed.</p>
+                     <button className="workspace-button workspace-button--ink" type="submit" disabled={actionLabel !== null}>
+                       {actionLabel ?? 'Set reputation score'} <ButtonArrow />
+                     </button>
+                   </form>
+                 </article>
+               </div>
+             ) : (
+                <div className={`moderator-locked moderator-locked--${moderatorAccessState}`}>
+                 <span className="moderator-locked__icon">
+                   <Icon name={moderatorAccessState === 'loading' ? 'orbit' : 'lock'} size={21} />
+                 </span>
+                 <div>
+                   <span className="panel-kicker">ACCESS GATE</span>
+                   <strong>
+                     {moderatorAccessState === 'disconnected'
+                       ? 'Connect to check moderator access.'
+                       : moderatorAccessState === 'loading'
+                         ? 'Checking moderator access on Monad.'
+                         : moderatorAccessState === 'unavailable'
+                           ? 'Moderator controls are paused until the role can be verified.'
+                           : 'This wallet cannot access moderator controls.'}
+                   </strong>
+                   <p>
+                     {moderatorAccessState === 'disconnected'
+                       ? 'Only the connected wallet address can unlock this workspace.'
+                       : moderatorAccessState === 'loading'
+                         ? 'The write forms will appear only after owner() and moderators(address) return a confirmed result.'
+                         : moderatorAccessState === 'unavailable'
+                           ? 'Try again when the Identity permission read is available. No transaction UI is exposed.'
+                           : 'A Series9Identity moderator or the protocol owner is required. No transaction UI is exposed.'}
+                   </p>
+                 </div>
+               </div>
+             )}
+           </div>
+           </section>
+         )}
+
+         {isHomePage && (
           <>
             <section className="architecture-section" id="architecture" aria-labelledby="architecture-title">
           <div className="container architecture-section__inner">
@@ -1592,7 +1971,9 @@ function App() {
               <div className="activity-panel">
                 <div className="activity-panel__header">
                   <div><span className="panel-kicker">PROTOCOL STATE</span><strong>Read from Monad</strong></div>
-                  <span className="activity-live"><i /> {stats.error ? 'stale' : 'live'}</span>
+                  <span className={`activity-live activity-live--${networkState}`}>
+                    <i /> {networkState === 'degraded' ? 'stale' : networkState === 'loading' ? 'syncing' : 'live'}
+                  </span>
                 </div>
                 <div className="activity-list">
                    {activity.slice(0, showAllActivity ? activity.length : 3).map((item) => (

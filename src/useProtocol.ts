@@ -10,6 +10,8 @@ import {
   decodeString,
   decodeUint,
   ethCall,
+  encodeModerators,
+  encodeOwner,
   rpcBatch,
 } from './chain.ts';
 
@@ -48,7 +50,10 @@ export type AccountStats = {
   loading: boolean;
   monBalance: bigint | null;
   ser9Balance: bigint | null;
+  identityOwner: boolean | null;
+  identityModerator: boolean | null;
   tokenId: bigint | null;
+  identityImage: string | null;
   name: string | null;
   handle: string | null;
   smartWallet: string | null;
@@ -82,7 +87,10 @@ const EMPTY_ACCOUNT: AccountStats = {
   loading: false,
   monBalance: null,
   ser9Balance: null,
+  identityOwner: null,
+  identityModerator: null,
   tokenId: null,
+  identityImage: null,
   name: null,
   handle: null,
   smartWallet: null,
@@ -173,6 +181,53 @@ export async function fetchGasSeries(head: bigint, signal: AbortSignal): Promise
     const block = result as unknown as { gasUsed?: string } | null;
     return block?.gasUsed ? Number(BigInt(block.gasUsed)) : 0;
   });
+}
+
+function decodeIdentityMetadataUri(tokenUri: string): string | null {
+  const commaIndex = tokenUri.indexOf(',');
+  if (commaIndex < 0) return null;
+
+  const metadata = tokenUri.slice(0, commaIndex);
+  if (!/^data:application\/json(?:;[^,]*)?$/i.test(metadata)) return null;
+
+  const payload = tokenUri.slice(commaIndex + 1);
+  if (/(?:^|;)base64(?:;|$)/i.test(metadata)) {
+    try {
+      const binary = atob(payload.replace(/\s/g, ''));
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    return decodeURIComponent(payload);
+  } catch {
+    return payload;
+  }
+}
+
+function extractIdentityImage(tokenUri: string | null): string | null {
+  if (!tokenUri) return null;
+
+  try {
+    const metadataText = decodeIdentityMetadataUri(tokenUri);
+    if (!metadataText) return null;
+
+    const metadata: unknown = JSON.parse(metadataText);
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+
+    const values = metadata as Record<string, unknown>;
+    for (const key of ['image', 'image_url']) {
+      const image = values[key];
+      if (typeof image === 'string' && image.trim()) return image.trim();
+    }
+  } catch {
+    // A broken tokenURI must not make the account read unusable.
+  }
+
+  return null;
 }
 
 export function useProtocol(): ProtocolStats {
@@ -304,31 +359,48 @@ function decodeUnstakeRequest(result: unknown): UnstakeRequest | null {
 }
 
 export function useAccount(address: string | null, blockNumber: bigint | null): AccountStats {
-  const [snapshot, setSnapshot] = useState<{ address: string; data: AccountStats } | null>(null);
+  const [snapshot, setSnapshot] = useState<{ address: string; tick: number; data: AccountStats } | null>(null);
 
   // Re-read roughly once per poll tick rather than on every new block.
   const tick = blockNumber === null ? 0 : Number(blockNumber / 100n);
 
   const load = useCallback(async (target: string, signal: AbortSignal): Promise<AccountStats> => {
-    const results = await rpcBatch(
-      [
-        { method: 'eth_getBalance', params: [target, 'latest'] },
-        callWithAddress(CONTRACTS.ser9, SELECTOR.balanceOf, target),
-        callWithAddress(CONTRACTS.identity, SELECTOR.ownerTokenId, target),
-        callWithAddress(CONTRACTS.identity, SELECTOR.reputationScoreOf, target),
-        callWithAddress(CONTRACTS.staking, SELECTOR.stakedBalance, target),
-        callWithAddress(CONTRACTS.identity, SELECTOR.pendingNFTRewards, target),
-        callWithAddress(CONTRACTS.staking, SELECTOR.earned, target),
-        callWithAddress(CONTRACTS.staking, SELECTOR.monadEarned, target),
-        callWithAddress(CONTRACTS.staking, SELECTOR.monadStakedBalance, target),
-        callWithAddress(CONTRACTS.staking, SELECTOR.ser9UnstakeRequestCount, target),
-        callWithAddress(CONTRACTS.staking, SELECTOR.monadUnstakeRequestCount, target),
-      ],
-      signal,
-    );
+    const [results, permissionResults] = await Promise.all([
+      rpcBatch(
+        [
+          { method: 'eth_getBalance', params: [target, 'latest'] },
+          callWithAddress(CONTRACTS.ser9, SELECTOR.balanceOf, target),
+          callWithAddress(CONTRACTS.identity, SELECTOR.ownerTokenId, target),
+          callWithAddress(CONTRACTS.identity, SELECTOR.reputationScoreOf, target),
+          callWithAddress(CONTRACTS.staking, SELECTOR.stakedBalance, target),
+          callWithAddress(CONTRACTS.identity, SELECTOR.pendingNFTRewards, target),
+          callWithAddress(CONTRACTS.staking, SELECTOR.earned, target),
+          callWithAddress(CONTRACTS.staking, SELECTOR.monadEarned, target),
+          callWithAddress(CONTRACTS.staking, SELECTOR.monadStakedBalance, target),
+          callWithAddress(CONTRACTS.staking, SELECTOR.ser9UnstakeRequestCount, target),
+          callWithAddress(CONTRACTS.staking, SELECTOR.monadUnstakeRequestCount, target),
+        ],
+        signal,
+      ),
+      rpcBatch(
+        [
+          ethCall(CONTRACTS.identity, encodeOwner()),
+          ethCall(CONTRACTS.identity, encodeModerators(target)),
+        ],
+        signal,
+      ).catch(() => [null, null]),
+    ]);
 
     const tokenId = decodeUint(results[2]);
     const hasIdentity = tokenId !== null && tokenId > 0n;
+    const ownerAddress = decodeAddress(permissionResults[0]);
+    const identityOwner = ownerAddress === null ? null : ownerAddress.toLowerCase() === target.toLowerCase();
+    const moderator = decodeBool(permissionResults[1]);
+    const identityModerator = identityOwner === true || moderator === true
+      ? true
+      : identityOwner === false && moderator === false
+        ? false
+        : null;
 
     const identityResults = hasIdentity
       ? await rpcBatch(
@@ -339,10 +411,11 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
             callWithUint(CONTRACTS.identity, SELECTOR.predictWalletAddress, tokenId),
             callWithUint(CONTRACTS.identity, SELECTOR.getEntityType, tokenId),
             callWithUint(CONTRACTS.identity, SELECTOR.isVerified, tokenId),
+            callWithUint(CONTRACTS.identity, SELECTOR.tokenURI, tokenId),
           ],
           signal,
-        ).catch(() => [null, null, null, null, null, null])
-      : [null, null, null, null, null, null];
+        ).catch(() => [null, null, null, null, null, null, null])
+      : [null, null, null, null, null, null, null];
 
     const ser9UnstakeRequestCount = decodeUint(results[9]);
     const monadUnstakeRequestCount = decodeUint(results[10]);
@@ -367,12 +440,16 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
       : null;
 
     const pendingNFTRewards = decodeUint(results[5]);
+    const identityImage = extractIdentityImage(decodeString(identityResults[6]));
 
     return {
       loading: false,
       monBalance: decodeUint(results[0]),
       ser9Balance: decodeUint(results[1]),
+      identityOwner,
+      identityModerator,
       tokenId: hasIdentity ? tokenId : null,
+      identityImage: hasIdentity ? identityImage : null,
       name: decodeString(identityResults[0]),
       handle: decodeString(identityResults[1]),
       smartWallet: decodeAddress(identityResults[2]),
@@ -401,15 +478,16 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
     if (!address) return;
 
     const controller = new AbortController();
+    const requestTick = tick;
 
     void load(address, controller.signal)
       .then((data) => {
         if (controller.signal.aborted) return;
-        setSnapshot({ address, data });
+        setSnapshot({ address, tick: requestTick, data });
       })
       .catch(() => {
         if (controller.signal.aborted) return;
-        setSnapshot({ address, data: EMPTY_ACCOUNT });
+        setSnapshot({ address, tick: requestTick, data: EMPTY_ACCOUNT });
       });
 
     return () => controller.abort();
@@ -417,5 +495,8 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
 
   if (!address) return EMPTY_ACCOUNT;
   if (snapshot?.address !== address) return { ...EMPTY_ACCOUNT, loading: true };
+  if (snapshot.tick !== tick) {
+    return { ...snapshot.data, loading: true, identityOwner: null, identityModerator: null };
+  }
   return snapshot.data;
 }

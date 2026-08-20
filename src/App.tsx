@@ -636,6 +636,7 @@ function App() {
   const stakingAmountCaretRef = useRef<number | null>(null);
   const menuToggleRef = useRef<HTMLButtonElement>(null);
   const navRef = useRef<HTMLElement>(null);
+  const writeInFlightRef = useRef(false);
 
   const wallet = useWallet();
   const { address: walletAddress, onMonad: walletOnMonad, estimateTransactionFee } = wallet;
@@ -840,8 +841,12 @@ function App() {
   async function handleSwitchNetwork() {
     try {
       await wallet.switchToMonad();
-    } catch {
-      announceError(`Could not switch networks. Select ${MONAD.name} in your wallet.`);
+    } catch (switchError) {
+      announceError(
+        switchError instanceof Error && switchError.message
+          ? switchError.message
+          : `Could not switch networks. Select ${MONAD.name} in your wallet.`,
+      );
     }
   }
 
@@ -867,10 +872,18 @@ function App() {
   async function sendAndWait(
     label: string,
     request: { to: string; data?: string; value?: bigint },
+    writeLockOwned = false,
   ): Promise<boolean> {
-    setActionLabel(`${label} / waiting for wallet`);
+    if (!writeLockOwned) {
+      if (writeInFlightRef.current) {
+        announceError('Another wallet action is already in progress.');
+        return false;
+      }
+      writeInFlightRef.current = true;
+    }
 
     try {
+      setActionLabel(`${label} / waiting for wallet`);
       const hash = await wallet.sendTransaction(request);
       setActionLabel(`${label} / pending`);
       announce(`${label} submitted ${shortenHash(hash)}. Waiting for Monad confirmation.`);
@@ -881,12 +894,19 @@ function App() {
       announceError(actionError instanceof Error ? actionError.message : `${label} failed.`);
       return false;
     } finally {
-      setActionLabel(null);
+      if (!writeLockOwned) {
+        setActionLabel(null);
+        writeInFlightRef.current = false;
+      }
     }
   }
 
   async function handleMintIdentity(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (writeInFlightRef.current) {
+      announceError('Another wallet action is already in progress.');
+      return;
+    }
     const name = mintName.trim();
     const bio = mintBio.trim();
     const handle = mintHandle.trim();
@@ -912,20 +932,28 @@ function App() {
       announceError('Mint fee is still loading from Monad.');
       return;
     }
-    if (!(await requireMonadWallet())) return;
+    writeInFlightRef.current = true;
+    setActionLabel('Preparing identity mint');
 
-    if (fee > 0n) {
-      const approved = await sendAndWait(`Approve ${symbol} mint fee`, {
-        to: CONTRACTS.ser9,
-        data: encodeApprove(CONTRACTS.identity, fee),
-      });
-      if (!approved) return;
+    try {
+      if (!(await requireMonadWallet())) return;
+
+      if (fee > 0n) {
+        const approved = await sendAndWait(`Approve ${symbol} mint fee`, {
+          to: CONTRACTS.ser9,
+          data: encodeApprove(CONTRACTS.identity, fee),
+        }, true);
+        if (!approved) return;
+      }
+
+      const data = handle
+        ? encodeMintIdentityWithHandle(name, bio, mintEntityType === 'human' ? 0 : 1, 200, 80, handle)
+        : encodeMintIdentity(name, bio, mintEntityType === 'human' ? 0 : 1, 200, 80);
+      await sendAndWait('Mint identity', { to: CONTRACTS.identity, data }, true);
+    } finally {
+      writeInFlightRef.current = false;
+      setActionLabel(null);
     }
-
-    const data = handle
-      ? encodeMintIdentityWithHandle(name, bio, mintEntityType === 'human' ? 0 : 1, 200, 80, handle)
-      : encodeMintIdentity(name, bio, mintEntityType === 'human' ? 0 : 1, 200, 80);
-    await sendAndWait('Mint identity', { to: CONTRACTS.identity, data });
   }
 
   async function handleSetIdentityHandle(event: FormEvent<HTMLFormElement>) {
@@ -1038,16 +1066,28 @@ function App() {
 
   async function handleStakeSer9(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if ((!wallet.address || !wallet.onMonad) && !(await requireMonadWallet())) return;
-    const amount = readActionAmount(stats.ser9Decimals, account.ser9Balance, 'stake');
-    if (amount === null) return;
+    if (writeInFlightRef.current) {
+      announceError('Another wallet action is already in progress.');
+      return;
+    }
+    writeInFlightRef.current = true;
+    setActionLabel(`Preparing ${symbol} stake`);
 
-    const approved = await sendAndWait(`Approve ${symbol} stake`, {
-      to: CONTRACTS.ser9,
-      data: encodeApprove(CONTRACTS.staking, amount),
-    });
-    if (!approved) return;
-    await sendAndWait(`Stake ${symbol}`, { to: CONTRACTS.staking, data: encodeStake(amount) });
+    try {
+      if ((!wallet.address || !wallet.onMonad) && !(await requireMonadWallet())) return;
+      const amount = readActionAmount(stats.ser9Decimals, account.ser9Balance, 'stake');
+      if (amount === null) return;
+
+      const approved = await sendAndWait(`Approve ${symbol} stake`, {
+        to: CONTRACTS.ser9,
+        data: encodeApprove(CONTRACTS.staking, amount),
+      }, true);
+      if (!approved) return;
+      await sendAndWait(`Stake ${symbol}`, { to: CONTRACTS.staking, data: encodeStake(amount) }, true);
+    } finally {
+      writeInFlightRef.current = false;
+      setActionLabel(null);
+    }
   }
 
   async function handleUnstakeSer9() {
@@ -1083,37 +1123,51 @@ function App() {
 
   async function handleStakeMonad(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if ((!wallet.address || !wallet.onMonad) && !(await requireMonadWallet())) return;
-    const amount = readActionAmount(MONAD.nativeCurrency.decimals, spendableMonBalance, 'stake');
-    if (amount === null) return;
-    const request = {
-      to: CONTRACTS.staking,
-      data: encodeStakeMonad(),
-      value: amount,
-    };
-    const monBalance = account.monBalance;
-    if (monBalance === null) {
-      announceError('MON balance is still loading.');
+    if (writeInFlightRef.current) {
+      announceError('Another wallet action is already in progress.');
       return;
     }
+    writeInFlightRef.current = true;
+    setActionLabel('Preparing MON stake');
 
     try {
-      const fee = await wallet.estimateTransactionFee(request);
+      if ((!wallet.address || !wallet.onMonad) && !(await requireMonadWallet())) return;
+      const amount = readActionAmount(MONAD.nativeCurrency.decimals, spendableMonBalance, 'stake');
+      if (amount === null) return;
+      const request = {
+        to: CONTRACTS.staking,
+        data: encodeStakeMonad(),
+        value: amount,
+      };
+      const monBalance = account.monBalance;
+      if (monBalance === null) {
+        announceError('MON balance is still loading.');
+        return;
+      }
+
+      setActionLabel('Estimating MON staking gas');
+      let fee: bigint;
+      try {
+        fee = await wallet.estimateTransactionFee(request);
+      } catch (estimateError) {
+        announceError(
+          estimateError instanceof Error
+            ? `Could not estimate MON staking gas: ${estimateError.message}`
+            : 'Could not estimate MON staking gas.',
+        );
+        return;
+      }
       const gasBuffer = fee / 2n + MON_NATIVE_GAS_CUSHION;
       if (monBalance < amount + fee + gasBuffer) {
         announceError(`Not enough MON for the stake amount plus estimated gas (${tokenAmount(fee + gasBuffer, MONAD.nativeCurrency.decimals)} MON).`);
         return;
       }
-    } catch (estimateError) {
-      announceError(
-        estimateError instanceof Error
-          ? `Could not estimate MON staking gas: ${estimateError.message}`
-          : 'Could not estimate MON staking gas.',
-      );
-      return;
-    }
 
-    await sendAndWait('Stake MON', request);
+      await sendAndWait('Stake MON', request, true);
+    } finally {
+      writeInFlightRef.current = false;
+      setActionLabel(null);
+    }
   }
 
   async function handleUnstakeMonad() {
@@ -1192,7 +1246,7 @@ function App() {
               </span>
             </button>
             {connected && !wallet.onMonad && (
-              <button className="wallet-button wallet-button--warning" type="button" onClick={handleSwitchNetwork}>
+              <button className="wallet-button wallet-button--warning" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={handleSwitchNetwork}>
                 <Icon name="bolt" size={16} />
                 <span>Switch to Monad</span>
               </button>
@@ -1201,7 +1255,8 @@ function App() {
               className={`wallet-button${connected ? ' is-connected' : ''}`}
               type="button"
               aria-pressed={connected}
-              disabled={wallet.connecting}
+              aria-busy={wallet.connecting || wallet.switching}
+              disabled={wallet.connecting || wallet.switching || actionLabel !== null}
               onClick={() => void handleConnectWallet()}
             >
               <Icon name={connected ? 'check' : 'wallet'} size={16} />
@@ -1249,7 +1304,7 @@ function App() {
                     View live pulse <ButtonArrow />
                   </a>
                 ) : (
-                  <button className="button button--gold" type="button" disabled={wallet.connecting} onClick={() => void handleConnectWallet()}>
+                    <button className="button button--gold" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleConnectWallet()}>
                     {wallet.connecting ? 'Connecting…' : 'Connect wallet'} <ButtonArrow />
                   </button>
                 )}
@@ -1408,7 +1463,7 @@ function App() {
             {connected && !wallet.onMonad && (
               <div className="workspace-banner">
                 <span><strong>Wrong network.</strong> Writes are available on {MONAD.name} only.</span>
-                <button className="workspace-button workspace-button--small" type="button" onClick={() => void handleSwitchNetwork()}>
+                <button className="workspace-button workspace-button--small" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleSwitchNetwork()}>
                   Switch to Monad <ButtonArrow />
                 </button>
               </div>
@@ -1426,7 +1481,7 @@ function App() {
                     <span className="workspace-empty__icon"><Icon name="diamond" size={23} /></span>
                     <strong>Connect to read your identity.</strong>
                     <p>The summary is resolved directly from Series9Identity on Monad. No profile data is stored here.</p>
-                    <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting} onClick={() => void handleConnectWallet()}>
+                    <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleConnectWallet()}>
                       {wallet.connecting ? 'Connecting...' : 'Connect wallet'} <ButtonArrow />
                     </button>
                   </div>
@@ -1481,7 +1536,7 @@ function App() {
                       <button
                         className="workspace-button workspace-button--small"
                         type="button"
-                        disabled={actionLabel !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n}
+                         disabled={wallet.connecting || wallet.switching || actionLabel !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n}
                         onClick={() => void handleClaimNFTRewards()}
                       >
                         Claim rewards <ButtonArrow />
@@ -1531,7 +1586,7 @@ function App() {
                     </div>
                     {mintFeeInsufficient && <p className="workspace-form__error">This wallet needs more {symbol} to cover the live mint fee.</p>}
                     <p className="workspace-form__note">SER9 approval is confirmed first, then the identity mint is submitted. Both receipts must succeed.</p>
-                    <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null || mintFeeInsufficient}>
+                     <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || mintFeeInsufficient}>
                       {actionLabel ? actionLabel : 'Approve & mint identity'} <ButtonArrow />
                     </button>
                   </form>
@@ -1543,17 +1598,17 @@ function App() {
                         <span>Update payment handle</span>
                         <input value={identityHandle} maxLength={32} onChange={(event) => setIdentityHandle(event.target.value)} placeholder={account.handle || 'new-handle'} />
                       </label>
-                      <button className="workspace-button workspace-button--ink" type="submit" disabled={actionLabel !== null}>Set handle <ButtonArrow /></button>
+                       <button className="workspace-button workspace-button--ink" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null}>Set handle <ButtonArrow /></button>
                     </form>
                     {!account.smartWallet && (
                       <div className="workspace-action-row">
                         <div><span className="panel-kicker">CREATE2 FACTORY</span><strong>Deploy the smart wallet</strong><p>Permissionless deployment at the predicted address for this token.</p></div>
-                        <button className="workspace-button workspace-button--outline" type="button" disabled={actionLabel !== null} onClick={() => void handleCreateIdentityWallet()}>Create wallet <ButtonArrow /></button>
+                         <button className="workspace-button workspace-button--outline" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleCreateIdentityWallet()}>Create wallet <ButtonArrow /></button>
                       </div>
                     )}
                      <div className="workspace-action-row workspace-action-row--muted">
                        <div><span className="panel-kicker">REPUTATION REWARDS</span><strong>Claim NFT rewards</strong><p className="token-copy"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol} currently attributable to this identity.</span></p></div>
-                      <button className="workspace-button workspace-button--outline" type="button" disabled={actionLabel !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n} onClick={() => void handleClaimNFTRewards()}>Claim <ButtonArrow /></button>
+                       <button className="workspace-button workspace-button--outline" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n} onClick={() => void handleClaimNFTRewards()}>Claim <ButtonArrow /></button>
                     </div>
                   </div>
                 )}
@@ -1633,14 +1688,14 @@ function App() {
                            <div className="amount-input-wrap"><input ref={stakingAmountInputRef} inputMode="decimal" value={stakingAmount} onChange={handleStakingAmountChange} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol}</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
                        </label>
                       <div className="workspace-action-grid">
-                        <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null || !canStakeSelected}>Approve & stake <ButtonArrow /></button>
-                        <button className="workspace-button workspace-button--ink" type="button" disabled={actionLabel !== null || !canUnstakeSelected} onClick={() => void handleUnstakeSer9()}>Request unstake <ButtonArrow /></button>
+                         <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canStakeSelected}>Approve & stake <ButtonArrow /></button>
+                         <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canUnstakeSelected} onClick={() => void handleUnstakeSer9()}>Request unstake <ButtonArrow /></button>
                       </div>
                     </form>
                     <div className="unstake-note"><span className="workspace-row-icon"><Icon name="lock" size={15} /></span><span><strong>Epoch delayed</strong><small>Unstake creates a request first. SER9 becomes claimable after the protocol delay.</small></span></div>
                      <div className="request-control">
                        <div><span className="panel-kicker">SER9 REQUESTS</span><small>{account.ser9UnstakeRequestCount === null ? 'Reading request count...' : `${account.ser9UnstakeRequestCount.toString()} request${account.ser9UnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
-                       <div className="request-control__form"><input inputMode="numeric" value={ser9RequestId} onChange={(event) => setSer9RequestId(event.target.value)} placeholder={account.ser9LatestUnstakeRequestId === null ? 'request id' : `latest ${account.ser9LatestUnstakeRequestId.toString()}`} aria-label="SER9 unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={actionLabel !== null || ser9ClaimRequestId === null} onClick={() => void handleClaimSer9Unstaked()}>Claim <ButtonArrow /></button></div>
+                        <div className="request-control__form"><input inputMode="numeric" value={ser9RequestId} onChange={(event) => setSer9RequestId(event.target.value)} placeholder={account.ser9LatestUnstakeRequestId === null ? 'request id' : `latest ${account.ser9LatestUnstakeRequestId.toString()}`} aria-label="SER9 unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || ser9ClaimRequestId === null} onClick={() => void handleClaimSer9Unstaked()}>Claim <ButtonArrow /></button></div>
                        {account.ser9LatestUnstakeRequest && (
                          <small className="request-control__detail">
                            <span className="token-value">
@@ -1652,7 +1707,7 @@ function App() {
                        )}
                        <small className="request-control__hint">Blank uses the latest request. It must have passed its minimum claim epoch.</small>
                      </div>
-                     <button className="workspace-button workspace-button--outline workspace-button--full" type="button" disabled={actionLabel !== null || account.stakingRewards === null || account.stakingRewards === 0n} onClick={() => void handleClaimSer9Rewards()}>Claim earned rewards <span className="token-value"><span>{tokenAmount(account.stakingRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></span> <ButtonArrow /></button>
+                      <button className="workspace-button workspace-button--outline workspace-button--full" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || account.stakingRewards === null || account.stakingRewards === 0n} onClick={() => void handleClaimSer9Rewards()}>Claim earned rewards <span className="token-value"><span>{tokenAmount(account.stakingRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></span> <ButtonArrow /></button>
                   </div>
                 ) : (
                   <div className="staking-tab-panel" role="tabpanel">
@@ -1668,14 +1723,14 @@ function App() {
                            <div className="amount-input-wrap"><input ref={stakingAmountInputRef} inputMode="decimal" value={stakingAmount} onChange={handleStakingAmountChange} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="MON" /><span>MON</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
                       </label>
                       <div className="workspace-action-grid">
-                        <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null || !canStakeSelected}>Stake MON <ButtonArrow /></button>
-                        <button className="workspace-button workspace-button--ink" type="button" disabled={actionLabel !== null || !canUnstakeSelected} onClick={() => void handleUnstakeMonad()}>Request unstake <ButtonArrow /></button>
+                         <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canStakeSelected}>Stake MON <ButtonArrow /></button>
+                         <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canUnstakeSelected} onClick={() => void handleUnstakeMonad()}>Request unstake <ButtonArrow /></button>
                       </div>
                     </form>
                     <div className="unstake-note"><span className="workspace-row-icon"><Icon name="lock" size={15} /></span><span><strong>Native MON, epoch covered</strong><small>MON is delegated through Monad staking. Coverage and the epoch delay must clear before a claim can settle.</small></span></div>
                      <div className="request-control">
                        <div><span className="panel-kicker">MON REQUESTS</span><small>{account.monadUnstakeRequestCount === null ? 'Reading request count...' : `${account.monadUnstakeRequestCount.toString()} request${account.monadUnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
-                       <div className="request-control__form"><input inputMode="numeric" value={monadRequestId} onChange={(event) => setMonadRequestId(event.target.value)} placeholder={account.monadLatestUnstakeRequestId === null ? 'request id' : `latest ${account.monadLatestUnstakeRequestId.toString()}`} aria-label="MON unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={actionLabel !== null || monadClaimRequestId === null} onClick={() => void handleClaimMonadUnstaked()}>Claim <ButtonArrow /></button></div>
+                        <div className="request-control__form"><input inputMode="numeric" value={monadRequestId} onChange={(event) => setMonadRequestId(event.target.value)} placeholder={account.monadLatestUnstakeRequestId === null ? 'request id' : `latest ${account.monadLatestUnstakeRequestId.toString()}`} aria-label="MON unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || monadClaimRequestId === null} onClick={() => void handleClaimMonadUnstaked()}>Claim <ButtonArrow /></button></div>
                        {account.monadLatestUnstakeRequest && (
                          <small className="request-control__detail">
                            <span className="token-value">
@@ -1716,7 +1771,7 @@ function App() {
              {connected && !wallet.onMonad && (
                <div className="workspace-banner">
                  <span><strong>Wrong network.</strong> Moderator writes are available on {MONAD.name} only.</span>
-                 <button className="workspace-button workspace-button--small" type="button" onClick={() => void handleSwitchNetwork()}>
+                 <button className="workspace-button workspace-button--small" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleSwitchNetwork()}>
                    Switch to Monad <ButtonArrow />
                  </button>
                </div>
@@ -1764,12 +1819,12 @@ function App() {
                        View Identity contract <ButtonArrow />
                      </a>
                      {!connected && (
-                       <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting} onClick={() => void handleConnectWallet()}>
+                         <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleConnectWallet()}>
                          {wallet.connecting ? 'Connecting...' : 'Connect wallet'} <ButtonArrow />
                        </button>
                      )}
                      {connected && !wallet.onMonad && (
-                       <button className="workspace-button workspace-button--outline" type="button" onClick={() => void handleSwitchNetwork()}>
+                        <button className="workspace-button workspace-button--outline" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleSwitchNetwork()}>
                          Switch network <ButtonArrow />
                        </button>
                      )}
@@ -1818,7 +1873,7 @@ function App() {
                        </div>
                      </div>
                      <p className="workspace-form__note">Calls <code>verify(tokenId, status)</code> on Series9Identity. This does not change ownership.</p>
-                     <button className="workspace-button workspace-button--gold" type="submit" disabled={actionLabel !== null}>
+                      <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null}>
                        {actionLabel ?? `${moderatorVerification === 'verified' ? 'Verify' : 'Unverify'} identity`} <ButtonArrow />
                      </button>
                    </form>
@@ -1839,7 +1894,7 @@ function App() {
                        <input inputMode="numeric" value={reputationScore} onChange={(event) => setReputationScore(event.target.value)} placeholder="e.g. 750,000" aria-label="Reputation score" min="1" max="1000000" />
                      </label>
                      <p className="workspace-form__note">Scores are checked in the browser before <code>setReputationScore(tokenId, newScore)</code> is signed.</p>
-                     <button className="workspace-button workspace-button--ink" type="submit" disabled={actionLabel !== null}>
+                      <button className="workspace-button workspace-button--ink" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null}>
                        {actionLabel ?? 'Set reputation score'} <ButtonArrow />
                      </button>
                    </form>
@@ -2021,7 +2076,7 @@ function App() {
               <button
                 className="button button--gold"
                 type="button"
-                disabled={wallet.connecting}
+                 disabled={wallet.connecting || wallet.switching || actionLabel !== null}
                 onClick={() => void handleConnectWallet()}
               >
                 {connected && wallet.address ? `Connected ${shortenAddress(wallet.address)}` : 'Connect wallet'} <ButtonArrow />

@@ -39,6 +39,7 @@ export const SELECTOR = {
   handleOf: '0x49491987',
   ownerOf: '0x6352211e',
   tokenURI: '0xc87b56dd',
+  profiles: '0xc36fe3d6',
   hasIdentity: '0x237f1a21',
   isVerified: '0x37b6d96b',
   nameOf: '0xf5c57382',
@@ -64,6 +65,7 @@ export const SELECTOR = {
   claimUnstakedMonad: '0xdd47e035',
   mintIdentity: '0x1714a810',
   mintIdentityWithHandle: '0x77c3c628',
+  updateProfile: '0xe2f26b8c',
   createWallet: '0x7a675bb6',
   setHandle: '0xa6e6178d',
   verify: '0x3e7cb0d3',
@@ -290,6 +292,30 @@ export function encodeCreateWallet(tokenId: bigint): string {
   return encodeCall(SELECTOR.createWallet, [encodeUint(tokenId)]);
 }
 
+/** Encode `updateProfile(tokenId,name,bio,hue,saturation)`. */
+export function encodeUpdateProfile(
+  tokenId: AbiUint,
+  name: string,
+  bio: string,
+  hue: AbiUint,
+  saturation: AbiUint,
+): string {
+  const nameTail = encodeDynamicString(name);
+  const bioTail = encodeDynamicString(bio);
+  const nameOffset = 5 * 32;
+  const bioOffset = nameOffset + nameTail.length / 2;
+
+  return encodeCall(SELECTOR.updateProfile, [
+    encodeUint(tokenId),
+    encodeUint(nameOffset),
+    encodeUint(bioOffset),
+    encodeUint8(hue),
+    encodeUint8(saturation),
+    nameTail,
+    bioTail,
+  ]);
+}
+
 export function encodeSetHandle(tokenId: bigint, handle: string): string {
   const handleTail = encodeDynamicString(handle);
   return encodeCall(SELECTOR.setHandle, [encodeUint(tokenId), encodeUint(64), handleTail]);
@@ -327,11 +353,21 @@ export function decodeUint(result: unknown): bigint | null {
   }
 }
 
-export function decodeAddress(result: unknown): string | null {
+export type DecodedAddressRead = {
+  ready: boolean;
+  address: string | null;
+};
+
+/** Decode an address while preserving whether the RPC returned a valid zero address. */
+export function decodeAddressRead(result: unknown): DecodedAddressRead {
   const hex = asHex(result);
-  if (!hex || hex.length < 66) return null;
+  if (!hex || hex.length < 66 || (hex.length - 2) % 2 !== 0) return { ready: false, address: null };
   const address = `0x${hex.slice(-40)}`;
-  return /^0x0{40}$/.test(address) ? null : address;
+  return { ready: true, address: /^0x0{40}$/.test(address) ? null : address };
+}
+
+export function decodeAddress(result: unknown): string | null {
+  return decodeAddressRead(result).address;
 }
 
 export function decodeBool(result: unknown): boolean | null {
@@ -357,6 +393,106 @@ export function decodeString(result: unknown): string | null {
   }
 
   return new TextDecoder().decode(bytes);
+}
+
+export type DecodedProfile = {
+  name: string;
+  bio: string;
+  entityType: bigint;
+  hue: bigint;
+  saturation: bigint;
+  verified: boolean;
+  registeredAt: bigint;
+};
+
+function decodeAbiWord(hex: string, index: number): bigint | null {
+  const word = hex.slice(2 + index * 64, 2 + (index + 1) * 64);
+  return word.length === 64 ? decodeUint(`0x${word}`) : null;
+}
+
+/** Decode a dynamic string at an ABI offset relative to the return-data head. */
+function decodeAbiStringAt(hex: string, offsetValue: bigint, headBytes: number): string | null {
+  if (offsetValue > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+
+  const offset = Number(offsetValue);
+  const payloadHex = hex.slice(2);
+  const payloadBytes = payloadHex.length / 2;
+  if (
+    !Number.isSafeInteger(offset) ||
+    offset < headBytes ||
+    offset % 32 !== 0 ||
+    offset + 32 > payloadBytes
+  ) {
+    return null;
+  }
+
+  const byteLengthValue = decodeUint(`0x${payloadHex.slice(offset * 2, offset * 2 + 64)}`);
+  if (byteLengthValue === null || byteLengthValue > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+
+  const byteLength = Number(byteLengthValue);
+  const bodyStart = offset + 32;
+  const paddedLength = Math.ceil(byteLength / 32) * 32;
+  if (bodyStart + byteLength > payloadBytes || bodyStart + paddedLength > payloadBytes) return null;
+
+  const body = payloadHex.slice(bodyStart * 2, (bodyStart + byteLength) * 2);
+  if (body.length !== byteLength * 2) return null;
+
+  const bytes = new Uint8Array(byteLength);
+  for (let index = 0; index < byteLength; index += 1) {
+    bytes[index] = parseInt(body.slice(index * 2, index * 2 + 2), 16);
+  }
+
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** Decode `profiles(tokenId)` while rejecting malformed ABI offsets and values. */
+export function decodeProfiles(result: unknown): DecodedProfile | null {
+  const hex = asHex(result);
+  const headWords = 7;
+  const headBytes = headWords * 32;
+  if (!hex || (hex.length - 2) % 64 !== 0 || hex.length < 2 + headWords * 64) return null;
+
+  const nameOffset = decodeAbiWord(hex, 0);
+  const bioOffset = decodeAbiWord(hex, 1);
+  const entityType = decodeAbiWord(hex, 2);
+  const hue = decodeAbiWord(hex, 3);
+  const saturation = decodeAbiWord(hex, 4);
+  const verifiedWord = decodeAbiWord(hex, 5);
+  const registeredAt = decodeAbiWord(hex, 6);
+  if (
+    nameOffset === null ||
+    bioOffset === null ||
+    entityType === null ||
+    hue === null ||
+    saturation === null ||
+    verifiedWord === null ||
+    registeredAt === null ||
+    entityType > 255n ||
+    hue > 255n ||
+    saturation > 255n ||
+    verifiedWord > 1n ||
+    registeredAt >= 2n ** 64n
+  ) {
+    return null;
+  }
+
+  const name = decodeAbiStringAt(hex, nameOffset, headBytes);
+  const bio = decodeAbiStringAt(hex, bioOffset, headBytes);
+  if (name === null || bio === null) return null;
+
+  return {
+    name,
+    bio,
+    entityType,
+    hue,
+    saturation,
+    verified: verifiedWord === 1n,
+    registeredAt,
+  };
 }
 
 // ─────────────────── formatting ───────────────────

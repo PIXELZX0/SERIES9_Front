@@ -11,10 +11,15 @@ import {
   callWithAddress,
   callWithUint,
   decodeAddress,
+  decodeAddressRead,
   decodeBool,
+  decodeProfiles,
   decodeString,
   decodeUint,
   ethCall,
+  encodeDynamicString,
+  encodeUint,
+  encodeUpdateProfile,
   formatCompact,
   formatUnits,
   rpcBatch,
@@ -37,6 +42,17 @@ assert.equal(
   '0x6352211e0000000000000000000000000000000000000000000000000000000000000001',
 );
 
+const updateProfileWord = (data: string, index: number): string => data.slice(10 + index * 64, 10 + (index + 1) * 64);
+const encodedUpdateProfile = encodeUpdateProfile(7n, 'S9', '', 200, 80);
+assert.equal(encodedUpdateProfile.slice(0, 10), SELECTOR.updateProfile);
+assert.equal(updateProfileWord(encodedUpdateProfile, 0), encodeUint(7n));
+assert.equal(updateProfileWord(encodedUpdateProfile, 1), encodeUint(160n));
+assert.equal(updateProfileWord(encodedUpdateProfile, 2), encodeUint(224n));
+assert.equal(updateProfileWord(encodedUpdateProfile, 3), encodeUint(200n));
+assert.equal(updateProfileWord(encodedUpdateProfile, 4), encodeUint(80n));
+assert.equal(updateProfileWord(encodedUpdateProfile, 7), encodeUint(0n), 'empty bio keeps a valid dynamic string tail');
+assert.equal(encodeDynamicString(''), encodeUint(0n));
+
 // ── decoding ──────────────────────────────────────────────────────────────────
 assert.equal(decodeUint('0x' + (12345n).toString(16).padStart(64, '0')), 12345n);
 assert.equal(decodeUint(null), null);
@@ -44,6 +60,8 @@ assert.equal(decodeUint('0x'), null);
 assert.equal(decodeBool('0x' + '1'.padStart(64, '0')), true);
 assert.equal(decodeBool('0x' + '0'.padStart(64, '0')), false);
 assert.equal(decodeAddress('0x' + '0'.repeat(64)), null, 'zero address reads as absent');
+assert.deepEqual(decodeAddressRead('0x' + '0'.repeat(64)), { ready: true, address: null });
+assert.deepEqual(decodeAddressRead(null), { ready: false, address: null });
 assert.equal(
   decodeAddress('0x000000000000000000000000d2cf3765c2e600f13470ed71aaab0ee3aa37f90a'),
   '0xd2cf3765c2e600f13470ed71aaab0ee3aa37f90a',
@@ -57,6 +75,29 @@ const encodedString =
   Buffer.from('yuchan', 'utf8').toString('hex').padEnd(64, '0');
 assert.equal(decodeString(encodedString), 'yuchan');
 assert.equal(decodeString('0x'), null);
+
+const profileNameTail = encodeDynamicString('S9');
+const profileBioTail = encodeDynamicString('');
+const encodedProfile = `0x${[
+  encodeUint(224n),
+  encodeUint(288n),
+  encodeUint(1n),
+  encodeUint(200n),
+  encodeUint(80n),
+  encodeUint(1n),
+  encodeUint(42n),
+].join('')}${profileNameTail}${profileBioTail}`;
+assert.deepEqual(decodeProfiles(encodedProfile), {
+  name: 'S9',
+  bio: '',
+  entityType: 1n,
+  hue: 200n,
+  saturation: 80n,
+  verified: true,
+  registeredAt: 42n,
+});
+const malformedProfile = `${encodedProfile.slice(0, 10 + 64)}${encodeUint(32n)}${encodedProfile.slice(10 + 128)}`;
+assert.equal(decodeProfiles(malformedProfile), null, 'profiles rejects an offset inside the head');
 
 // ── formatting ────────────────────────────────────────────────────────────────
 assert.equal(formatUnits(1_500_000_000_000_000_000n, 18, 2), '1.5');

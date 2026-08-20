@@ -1492,6 +1492,11 @@ a:focus-visible {
   grid-template-columns: 1fr 1fr;
 }
 
+.workspace-grid--identity .smart-wallet-panel {
+  grid-column: 1 / -1;
+  background: var(--paper-deep);
+}
+
 .workspace-grid--staking {
   grid-template-columns: 1.05fr .95fr;
 }
@@ -1842,6 +1847,120 @@ a:focus-visible {
   color: var(--gold-bright);
 }
 
+.smart-wallet-panel .workspace-panel__header > svg {
+  color: var(--gold-ink);
+}
+
+.smart-wallet-panel__body {
+  display: grid;
+  gap: 20px;
+  padding: 25px;
+}
+
+.smart-wallet-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 17px;
+  border: 1px solid rgba(201, 164, 93, .42);
+  background: rgba(232, 196, 106, .1);
+}
+
+.smart-wallet-state--deployed {
+  border-color: rgba(69, 97, 59, .38);
+  background: rgba(69, 97, 59, .08);
+}
+
+.smart-wallet-state__icon {
+  display: grid;
+  width: 37px;
+  height: 37px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgba(201, 164, 93, .7);
+  color: var(--gold-ink);
+}
+
+.smart-wallet-state--deployed .smart-wallet-state__icon {
+  border-color: rgba(69, 97, 59, .55);
+  color: var(--positive-ink);
+}
+
+.smart-wallet-state > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.smart-wallet-state strong {
+  font-family: var(--serif);
+  font-size: 24px;
+  font-weight: 400;
+  letter-spacing: -.04em;
+  line-height: 1;
+}
+
+.smart-wallet-state p {
+  max-width: 620px;
+  margin: 2px 0 0;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.smart-wallet-address {
+  display: grid;
+  gap: 7px;
+  padding: 17px;
+  border: 1px solid var(--line);
+  background: var(--paper-light);
+}
+
+.smart-wallet-address code {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.smart-wallet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.smart-wallet-actions .workspace-button {
+  min-width: 155px;
+}
+
+.smart-wallet-panel__note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.smart-wallet-panel__note > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--gold-ink);
+}
+
+.smart-wallet-panel__note strong {
+  color: var(--ink);
+}
+
+.smart-wallet-panel__create {
+  justify-self: start;
+}
+
 .workspace-empty {
   display: grid;
   min-height: 405px;
@@ -1858,6 +1977,15 @@ a:focus-visible {
   color: var(--ink-muted);
   font-size: 11px;
   font-weight: 800;
+}
+
+.workspace-empty--error {
+  color: #88462f;
+}
+
+.workspace-empty--error .workspace-empty__icon {
+  border-color: rgba(177, 91, 66, .55);
+  color: #88462f;
 }
 
 .workspace-empty__icon {
@@ -1998,6 +2126,28 @@ a:focus-visible {
   letter-spacing: .04em;
 }
 
+.identity-summary__bio {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  max-width: 340px;
+  margin-top: 9px !important;
+  color: var(--ink-muted) !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  line-height: 1.5;
+  letter-spacing: 0 !important;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.identity-summary__bio span {
+  color: var(--gold-ink);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .13em;
+}
+
 .identity-summary__facts {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -2135,6 +2285,25 @@ a:focus-visible {
   padding: 25px;
 }
 
+.workspace-form--profile {
+  border-top: 1px solid var(--line-dark);
+  border-bottom: 1px solid var(--line-dark);
+}
+
+.workspace-form__intro {
+  display: grid;
+  gap: 5px;
+}
+
+.workspace-form__intro strong {
+  color: var(--paper);
+  font-family: var(--serif);
+  font-size: 25px;
+  font-weight: 400;
+  letter-spacing: -.04em;
+  line-height: 1;
+}
+
 .workspace-field {
   display: grid;
   gap: 7px;
@@ -2179,6 +2348,10 @@ a:focus-visible {
 
 .identity-action-panel .workspace-field > span i {
   color: var(--gold-bright);
+}
+
+.workspace-field > span i.is-invalid {
+  color: #e29073;
 }
 
 .workspace-field input,
@@ -2390,6 +2563,15 @@ a:focus-visible {
 .workspace-rail-note--positive {
   align-items: center;
   color: rgba(244, 240, 230, .7);
+}
+
+.workspace-rail-note--error {
+  border-color: rgba(177, 91, 66, .4);
+  color: #88462f;
+}
+
+.identity-action-panel .workspace-rail-note--error {
+  color: #e29073;
 }
 
 .workspace-action-row {
@@ -4214,6 +4396,10 @@ a:focus-visible {
     font-size: 25px;
   }
 
+  .identity-summary__bio {
+    max-width: 240px;
+  }
+
   .identity-summary__facts {
     grid-template-columns: repeat(2, 1fr);
     gap: 17px 12px;
@@ -4243,6 +4429,36 @@ a:focus-visible {
   .moderator-form {
     padding-right: 15px;
     padding-left: 15px;
+  }
+
+  .smart-wallet-panel__body {
+    gap: 15px;
+    padding: 15px;
+  }
+
+  .smart-wallet-state {
+    padding: 14px;
+  }
+
+  .smart-wallet-state strong {
+    font-size: 22px;
+  }
+
+  .smart-wallet-address {
+    padding: 14px;
+  }
+
+  .smart-wallet-address code {
+    font-size: 9px;
+  }
+
+  .smart-wallet-actions {
+    display: grid;
+  }
+
+  .smart-wallet-actions .workspace-button,
+  .smart-wallet-panel__create {
+    width: 100%;
   }
 
   .moderator-facts {

@@ -16,6 +16,7 @@ import {
   encodeStake,
   encodeStakeMonad,
   encodeUnstake,
+  encodeUpdateProfile,
   encodeVerify,
   explorerAddressUrl,
   formatCompact,
@@ -32,6 +33,16 @@ type Page = 'home' | 'identity' | 'staking' | 'moderator';
 type TokenKind = 'SER9' | 'MON';
 type StakingAsset = TokenKind;
 type ToastKind = 'success' | 'error';
+type UnresolvedSubmittedTransaction = {
+  hash: string;
+  label: string;
+  walletAddress: string;
+};
+type UnresolvedSubmittedTransactions = Record<string, UnresolvedSubmittedTransaction>;
+
+const UNRESOLVED_TRANSACTION_STORAGE_KEY = 'series9:unresolved-submitted-transactions';
+const WALLET_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+const TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 type Feature = {
   id: 'identity' | 'staking' | 'wallet';
@@ -245,6 +256,10 @@ function parseUnsignedInteger(value: string): bigint | null {
   }
 }
 
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
 function identityTypeLabel(value: bigint | null): string {
   if (value === null) return PENDING;
   return value === 0n ? 'Human' : value === 1n ? 'AI' : `Type ${value.toString()}`;
@@ -259,6 +274,90 @@ function unstakeRequestState(request: { minClaimEpoch: bigint; claimed: boolean 
 
 function shortenHash(hash: string): string {
   return `${hash.slice(0, 10)}...${hash.slice(-6)}`;
+}
+
+function walletAddressKey(address: string): string {
+  return address.toLowerCase();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getUnresolvedTransactionStorage(): Storage | null {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isStoredUnresolvedTransaction(value: unknown, key: string): value is UnresolvedSubmittedTransaction {
+  if (!isRecord(value)) return false;
+
+  const { hash, label, walletAddress } = value;
+  return typeof hash === 'string' &&
+    TRANSACTION_HASH_PATTERN.test(hash) &&
+    !/^0+$/.test(hash.slice(2)) &&
+    typeof label === 'string' &&
+    label.trim().length > 0 &&
+    typeof walletAddress === 'string' &&
+    WALLET_ADDRESS_PATTERN.test(walletAddress) &&
+    walletAddressKey(walletAddress) === key;
+}
+
+function readUnresolvedSubmittedTransactions(): UnresolvedSubmittedTransactions {
+  const storage = getUnresolvedTransactionStorage();
+  if (!storage) return {};
+
+  let serialized: string | null;
+  try {
+    serialized = storage.getItem(UNRESOLVED_TRANSACTION_STORAGE_KEY);
+  } catch {
+    return {};
+  }
+  if (serialized === null) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return {};
+  }
+  if (!isRecord(parsed)) return {};
+
+  const transactions: UnresolvedSubmittedTransactions = {};
+  for (const [storedKey, value] of Object.entries(parsed)) {
+    const key = walletAddressKey(storedKey);
+    if (!WALLET_ADDRESS_PATTERN.test(storedKey) || !isStoredUnresolvedTransaction(value, key)) continue;
+    transactions[key] = {
+      hash: value.hash,
+      label: value.label,
+      walletAddress: value.walletAddress,
+    };
+  }
+  return transactions;
+}
+
+function persistUnresolvedSubmittedTransactions(transactions: UnresolvedSubmittedTransactions): void {
+  const storage = getUnresolvedTransactionStorage();
+  if (!storage) return;
+
+  try {
+    if (Object.keys(transactions).length === 0) {
+      storage.removeItem(UNRESOLVED_TRANSACTION_STORAGE_KEY);
+    } else {
+      storage.setItem(UNRESOLVED_TRANSACTION_STORAGE_KEY, JSON.stringify(transactions));
+    }
+  } catch {
+    // Storage can be disabled or unavailable in a private browsing context.
+  }
+}
+
+function isKnownMinedRevert(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Transaction was mined but reverted on Monad.';
 }
 
 function routeHref(route: SiteRoute, hash = ''): string {
@@ -614,6 +713,10 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAllActivity, setShowAllActivity] = useState(false);
   const [toast, setToast] = useState<{ message: string; kind: ToastKind } | null>(null);
+  const [accountRefreshVersion, setAccountRefreshVersion] = useState(0);
+  const [unresolvedSubmittedTransactions, setUnresolvedSubmittedTransactions] = useState<UnresolvedSubmittedTransactions>(
+    readUnresolvedSubmittedTransactions,
+  );
   const [activeSection, setActiveSection] = useState<SectionId>('overview');
   const [actionLabel, setActionLabel] = useState<string | null>(null);
   const [moderatorTokenId, setModeratorTokenId] = useState('');
@@ -624,6 +727,10 @@ function App() {
   const [mintBio, setMintBio] = useState('');
   const [mintHandle, setMintHandle] = useState('');
   const [mintEntityType, setMintEntityType] = useState<'human' | 'ai'>('human');
+  const [profileName, setProfileName] = useState('');
+  const [profileBio, setProfileBio] = useState('');
+  const [profileDraftKey, setProfileDraftKey] = useState<string | null>(null);
+  const [smartWalletCreatePending, setSmartWalletCreatePending] = useState(false);
   const [identityHandle, setIdentityHandle] = useState('');
   const [stakingAsset, setStakingAsset] = useState<StakingAsset>('SER9');
   const [stakingAmount, setStakingAmount] = useState('');
@@ -637,22 +744,32 @@ function App() {
   const menuToggleRef = useRef<HTMLButtonElement>(null);
   const navRef = useRef<HTMLElement>(null);
   const writeInFlightRef = useRef(false);
+  const profileDraftKeyRef = useRef<string | null>(null);
+  const smartWalletCreateKeyRef = useRef<string | null>(null);
+  const unresolvedSubmittedTransactionsRef = useRef<UnresolvedSubmittedTransactions>(unresolvedSubmittedTransactions);
 
   const wallet = useWallet();
   const { address: walletAddress, onMonad: walletOnMonad, estimateTransactionFee } = wallet;
   const stats = useProtocol();
-  const account = useAccount(wallet.address, stats.blockNumber);
+  const account = useAccount(wallet.address, stats.blockNumber, accountRefreshVersion);
 
   const connected = wallet.address !== null;
-  const moderatorAccess = account.identityModerator === true;
-  const moderatorPermissionLoading = connected && account.loading;
+  const accountReadReady = connected && !account.loading && account.readStatus === 'ready';
+  const stakingReadBlocked = connected && !accountReadReady;
+  const accountIdentityKey = walletAddress && account.tokenId !== null
+    ? `${walletAddress.toLowerCase()}:${account.tokenId.toString()}`
+    : null;
+  const moderatorAccess = accountReadReady && account.readStatus === 'ready' && account.identityModerator === true;
+  const moderatorPermissionLoading = connected && account.readStatus !== 'error' && !accountReadReady;
   const moderatorAccessState: 'disconnected' | 'loading' | 'authorized' | 'denied' | 'unavailable' = !connected
     ? 'disconnected'
-    : moderatorPermissionLoading
+    : account.readStatus === 'error'
+      ? 'unavailable'
+      : moderatorPermissionLoading
       ? 'loading'
-      : moderatorAccess
+      : accountReadReady && moderatorAccess
         ? 'authorized'
-        : account.identityModerator === null
+        : !accountReadReady || account.identityModerator === null
           ? 'unavailable'
           : 'denied';
   const moderatorPermissionLabel = moderatorAccessState === 'disconnected'
@@ -666,9 +783,11 @@ function App() {
           : 'Access denied';
   const moderatorRole = moderatorAccessState === 'loading'
     ? 'Verifying onchain role'
-    : account.identityOwner === true
+    : account.readStatus === 'error'
+      ? 'Read paused'
+      : accountReadReady && account.identityOwner === true
       ? 'Protocol owner'
-      : moderatorAccess
+      : accountReadReady && moderatorAccess
         ? 'Identity moderator'
         : connected
           ? 'No moderator role'
@@ -697,6 +816,21 @@ function App() {
   const identityArtworkAlt = account.tokenId === null
     ? 'SERIES9 identity artwork preview'
     : `Identity NFT #${account.tokenId.toString()} artwork`;
+  const smartWalletLive = account.walletOfReadReady && account.smartWallet !== null;
+  const smartWalletPredictionAvailable = account.predictedWalletReadReady && account.predictedWallet !== null;
+  const smartWalletReadsAvailable = account.walletOfReadReady && account.predictedWalletReadReady;
+  const unresolvedSubmittedTransaction = walletAddress === null
+    ? null
+    : unresolvedSubmittedTransactions[walletAddressKey(walletAddress)] ?? null;
+  const smartWalletAddress = smartWalletLive
+    ? account.smartWallet
+    : smartWalletPredictionAvailable
+      ? account.predictedWallet
+      : null;
+  const profileDraftReady = accountIdentityKey !== null &&
+    profileDraftKey === accountIdentityKey &&
+    accountReadReady &&
+    account.profileReadReady;
   const mintFee = mintEntityType === 'human' ? stats.humanMintFee : stats.aiMintFee;
   const mintFeeInsufficient =
     connected && mintFee !== null && account.ser9Balance !== null && account.ser9Balance < mintFee;
@@ -738,6 +872,39 @@ function App() {
       active = false;
     };
   }, [walletAddress, walletOnMonad, estimateTransactionFee]);
+
+  useEffect(() => {
+    if (accountIdentityKey === null) {
+      profileDraftKeyRef.current = null;
+      return;
+    }
+    if (
+      profileDraftKeyRef.current === accountIdentityKey ||
+      account.loading ||
+      account.readStatus !== 'ready' ||
+      !account.profileReadReady
+    ) return;
+
+    profileDraftKeyRef.current = accountIdentityKey;
+    setProfileName(account.name ?? '');
+    setProfileBio(account.bio ?? '');
+    setProfileDraftKey(accountIdentityKey);
+  }, [account.bio, account.loading, account.name, account.profileReadReady, account.readStatus, accountIdentityKey]);
+
+  useEffect(() => {
+    const pendingKey = smartWalletCreateKeyRef.current;
+    if (pendingKey === null) return;
+
+    const pendingWalletKey = pendingKey.split(':', 1)[0];
+    const walletChanged = walletAddress === null || walletAddressKey(walletAddress) !== pendingWalletKey;
+    const readyReadShowsDifferentIdentity = accountReadReady &&
+      (accountIdentityKey === null || accountIdentityKey !== pendingKey);
+
+    if (walletChanged || readyReadShowsDifferentIdentity || account.smartWallet !== null) {
+      smartWalletCreateKeyRef.current = null;
+      setSmartWalletCreatePending(false);
+    }
+  }, [account.smartWallet, accountIdentityKey, accountReadReady, walletAddress]);
 
   useEffect(() => {
     if (!isHomePage) return;
@@ -801,6 +968,53 @@ function App() {
 
   function announceError(message: string) {
     announce(message, 'error');
+  }
+
+  function rememberUnresolvedSubmittedTransaction(transaction: UnresolvedSubmittedTransaction) {
+    const nextTransactions = {
+      ...unresolvedSubmittedTransactionsRef.current,
+      [walletAddressKey(transaction.walletAddress)]: transaction,
+    };
+    unresolvedSubmittedTransactionsRef.current = nextTransactions;
+    setUnresolvedSubmittedTransactions(nextTransactions);
+    persistUnresolvedSubmittedTransactions(nextTransactions);
+  }
+
+  function handleAcknowledgeUnresolvedTransaction() {
+    if (!walletAddress) return;
+
+    const key = walletAddressKey(walletAddress);
+    const transaction = unresolvedSubmittedTransactionsRef.current[key];
+    if (!transaction) return;
+
+    const nextTransactions = { ...unresolvedSubmittedTransactionsRef.current };
+    delete nextTransactions[key];
+    unresolvedSubmittedTransactionsRef.current = nextTransactions;
+    setUnresolvedSubmittedTransactions(nextTransactions);
+    persistUnresolvedSubmittedTransactions(nextTransactions);
+    if (transaction.label === 'Create smart wallet') {
+      smartWalletCreateKeyRef.current = null;
+      setSmartWalletCreatePending(false);
+    }
+    setAccountRefreshVersion((version) => version + 1);
+    announce(`Verified ${shortenHash(transaction.hash)}. New writes are available for this wallet.`);
+  }
+
+  function renderUnresolvedTransactionBanner() {
+    if (!unresolvedSubmittedTransaction) return null;
+
+    return (
+      <div className="workspace-banner workspace-banner--uncertain" role="alert">
+        <span>
+          <strong>Transaction status uncertain.</strong>{' '}
+          {unresolvedSubmittedTransaction.label} was submitted as <code>{shortenHash(unresolvedSubmittedTransaction.hash)}</code> from {shortenAddress(unresolvedSubmittedTransaction.walletAddress)}.
+          {' '}Verify it in your wallet or Monad explorer before continuing.
+        </span>
+        <button className="workspace-button workspace-button--small" type="button" onClick={handleAcknowledgeUnresolvedTransaction}>
+          I verified the transaction
+        </button>
+      </div>
+    );
   }
 
   function handleStakingAmountChange(event: ChangeEvent<HTMLInputElement>) {
@@ -874,6 +1088,17 @@ function App() {
     request: { to: string; data?: string; value?: bigint },
     writeLockOwned = false,
   ): Promise<boolean> {
+    const submittedWalletAddress = wallet.address;
+    const unresolvedTransaction = submittedWalletAddress === null
+      ? null
+      : unresolvedSubmittedTransactionsRef.current[walletAddressKey(submittedWalletAddress)] ?? null;
+    if (unresolvedTransaction) {
+      announceError(
+        `Transaction ${shortenHash(unresolvedTransaction.hash)} is unresolved. Verify it before sending another wallet action.`,
+      );
+      return false;
+    }
+
     if (!writeLockOwned) {
       if (writeInFlightRef.current) {
         announceError('Another wallet action is already in progress.');
@@ -882,16 +1107,30 @@ function App() {
       writeInFlightRef.current = true;
     }
 
+    let submittedHash: string | null = null;
     try {
       setActionLabel(`${label} / waiting for wallet`);
       const hash = await wallet.sendTransaction(request);
+      submittedHash = hash;
       setActionLabel(`${label} / pending`);
       announce(`${label} submitted ${shortenHash(hash)}. Waiting for Monad confirmation.`);
       await wallet.waitForTransaction(hash);
+      setAccountRefreshVersion((version) => version + 1);
       announce(`${label} confirmed. Live account data will refresh shortly.`);
       return true;
     } catch (actionError) {
-      announceError(actionError instanceof Error ? actionError.message : `${label} failed.`);
+      if (submittedHash !== null && submittedWalletAddress !== null && !isKnownMinedRevert(actionError)) {
+        rememberUnresolvedSubmittedTransaction({
+          hash: submittedHash,
+          label,
+          walletAddress: submittedWalletAddress,
+        });
+        announceError(
+          `${label} submitted ${shortenHash(submittedHash)}, but its receipt could not be verified. Do not retry until you verify the transaction.`,
+        );
+      } else {
+        announceError(actionError instanceof Error ? actionError.message : `${label} failed.`);
+      }
       return false;
     } finally {
       if (!writeLockOwned) {
@@ -903,6 +1142,10 @@ function App() {
 
   async function handleMintIdentity(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!accountReadReady) {
+      announceError('Wait for a successful account read before minting an identity.');
+      return;
+    }
     if (writeInFlightRef.current) {
       announceError('Another wallet action is already in progress.');
       return;
@@ -958,6 +1201,10 @@ function App() {
 
   async function handleSetIdentityHandle(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!accountReadReady) {
+      announceError('Wait for a successful account read before updating identity state.');
+      return;
+    }
     if (account.tokenId === null) {
       announceError('Mint an identity before setting a handle.');
       return;
@@ -976,19 +1223,108 @@ function App() {
     });
   }
 
+  async function handleUpdateIdentityProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!accountReadReady || !account.profileReadReady || !profileDraftReady) {
+      announceError('Wait for the complete profile read before updating your identity.');
+      return;
+    }
+    if (account.tokenId === null) {
+      announceError('Mint an identity before updating its profile.');
+      return;
+    }
+
+    const name = profileName.trim();
+    const bio = profileBio.trim();
+    const nameBytes = utf8ByteLength(name);
+    const bioBytes = utf8ByteLength(bio);
+    if (!name) {
+      announceError('Give your identity a name before updating its profile.');
+      return;
+    }
+    if (nameBytes > 32 || bioBytes > 128) {
+      announceError('Name must be 32 bytes or less and bio must be 128 bytes or less.');
+      return;
+    }
+    if (account.hue === null || account.saturation === null) {
+      announceError('Current profile colors are still loading from Monad. Try again shortly.');
+      return;
+    }
+    if (!(await requireMonadWallet())) return;
+
+    await sendAndWait('Update profile', {
+      to: CONTRACTS.identity,
+      data: encodeUpdateProfile(account.tokenId, name, bio, account.hue, account.saturation),
+    });
+  }
+
   async function handleCreateIdentityWallet() {
+    if (!accountReadReady) {
+      announceError('Wait for a successful account read before creating a smart wallet.');
+      return;
+    }
     if (account.tokenId === null) {
       announceError('Mint an identity before creating its smart wallet.');
       return;
     }
-    if (!(await requireMonadWallet())) return;
-    await sendAndWait('Create smart wallet', {
-      to: CONTRACTS.identity,
-      data: encodeCreateWallet(account.tokenId),
-    });
+    if (!account.walletOfReadReady || !account.predictedWalletReadReady || account.predictedWallet === null) {
+      announceError('Smart wallet address reads are not ready. Try again after Monad refreshes.');
+      return;
+    }
+    if (account.smartWallet !== null) {
+      announce('This identity already has a live smart wallet.');
+      return;
+    }
+
+    const identityKey = accountIdentityKey;
+    if (identityKey === null) {
+      announceError('Identity state is still loading. Try again shortly.');
+      return;
+    }
+    if (smartWalletCreatePending || smartWalletCreateKeyRef.current === identityKey) {
+      announceError('Smart wallet creation is awaiting the live wallet read.');
+      return;
+    }
+
+    smartWalletCreateKeyRef.current = identityKey;
+    setSmartWalletCreatePending(true);
+    let confirmed = false;
+    try {
+      if (!(await requireMonadWallet())) return;
+      confirmed = await sendAndWait('Create smart wallet', {
+        to: CONTRACTS.identity,
+        data: encodeCreateWallet(account.tokenId),
+      });
+    } finally {
+      const pendingTransactionWalletKey = identityKey.split(':', 1)[0];
+      const unresolvedTransaction = unresolvedSubmittedTransactionsRef.current[pendingTransactionWalletKey];
+      if (!confirmed && unresolvedTransaction === undefined && smartWalletCreateKeyRef.current === identityKey) {
+        smartWalletCreateKeyRef.current = null;
+        setSmartWalletCreatePending(false);
+      }
+    }
+  }
+
+  async function handleCopySmartWalletAddress() {
+    if (!smartWalletAddress) {
+      announceError('The smart wallet address is not available yet.');
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is not available in this browser.');
+      await navigator.clipboard.writeText(smartWalletAddress);
+      announce('Smart wallet address copied.');
+    } catch (copyError) {
+      announceError(copyError instanceof Error ? copyError.message : 'Could not copy the smart wallet address.');
+    }
   }
 
   async function handleClaimNFTRewards() {
+    if (!accountReadReady) {
+      announceError('Wait for a successful account read before claiming identity rewards.');
+      return;
+    }
     if (account.pendingNFTRewards === null || account.pendingNFTRewards === 0n) {
       announceError('No NFT rewards are currently claimable.');
       return;
@@ -1002,7 +1338,7 @@ function App() {
 
   async function handleModeratorVerification(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!moderatorAccess) {
+    if (!accountReadReady || account.readStatus !== 'ready' || !moderatorAccess) {
       announceError('Moderator permission is not confirmed for this wallet.');
       return;
     }
@@ -1023,7 +1359,7 @@ function App() {
 
   async function handleSetReputationScore(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!moderatorAccess) {
+    if (!accountReadReady || account.readStatus !== 'ready' || !moderatorAccess) {
       announceError('Moderator permission is not confirmed for this wallet.');
       return;
     }
@@ -1064,8 +1400,20 @@ function App() {
     return amount;
   }
 
+  function guardStakingAccountRead(): boolean {
+    if (!stakingReadBlocked) return true;
+
+    announceError(
+      account.readStatus === 'error'
+        ? 'Staking writes are paused because the connected account read failed.'
+        : 'Staking writes are paused until the connected account read is ready.',
+    );
+    return false;
+  }
+
   async function handleStakeSer9(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!guardStakingAccountRead()) return;
     if (writeInFlightRef.current) {
       announceError('Another wallet action is already in progress.');
       return;
@@ -1091,6 +1439,7 @@ function App() {
   }
 
   async function handleUnstakeSer9() {
+    if (!guardStakingAccountRead()) return;
     if ((!wallet.address || !wallet.onMonad) && !(await requireMonadWallet())) return;
     const amount = readActionAmount(stats.ser9Decimals, account.staked, 'unstake');
     if (amount === null) return;
@@ -1101,6 +1450,7 @@ function App() {
   }
 
   async function handleClaimSer9Rewards() {
+    if (!guardStakingAccountRead()) return;
     if (account.stakingRewards === null || account.stakingRewards === 0n) {
       announceError('No SER9 staking rewards are currently claimable.');
       return;
@@ -1110,6 +1460,11 @@ function App() {
   }
 
   async function handleClaimSer9Unstaked() {
+    if (!guardStakingAccountRead()) return;
+    if (ser9RequestId.trim() === '' && !account.ser9LatestUnstakeRequestReady) {
+      announceError('Wait for the latest SER9 unstake request to load before claiming.');
+      return;
+    }
     if (ser9ClaimRequestId === null) {
       announceError('Enter a valid SER9 request id, or wait for the latest request to load.');
       return;
@@ -1123,6 +1478,7 @@ function App() {
 
   async function handleStakeMonad(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!guardStakingAccountRead()) return;
     if (writeInFlightRef.current) {
       announceError('Another wallet action is already in progress.');
       return;
@@ -1171,6 +1527,7 @@ function App() {
   }
 
   async function handleUnstakeMonad() {
+    if (!guardStakingAccountRead()) return;
     if ((!wallet.address || !wallet.onMonad) && !(await requireMonadWallet())) return;
     const amount = readActionAmount(MONAD.nativeCurrency.decimals, account.monadStaked, 'unstake');
     if (amount === null) return;
@@ -1181,6 +1538,11 @@ function App() {
   }
 
   async function handleClaimMonadUnstaked() {
+    if (!guardStakingAccountRead()) return;
+    if (monadRequestId.trim() === '' && !account.monadLatestUnstakeRequestReady) {
+      announceError('Wait for the latest MON unstake request to load before claiming.');
+      return;
+    }
     if (monadClaimRequestId === null) {
       announceError('Enter a valid MON request id, or wait for the latest request to load.');
       return;
@@ -1460,6 +1822,8 @@ function App() {
               </div>
             )}
 
+            {renderUnresolvedTransactionBanner()}
+
             {connected && !wallet.onMonad && (
               <div className="workspace-banner">
                 <span><strong>Wrong network.</strong> Writes are available on {MONAD.name} only.</span>
@@ -1489,6 +1853,12 @@ function App() {
                   <div className="workspace-empty workspace-empty--compact">
                     <span className="workspace-status__pulse" />Reading identity state from Monad...
                   </div>
+                ) : account.readStatus === 'error' && account.tokenId === null ? (
+                  <div className="workspace-empty workspace-empty--error">
+                    <span className="workspace-empty__icon"><Icon name="bolt" size={23} /></span>
+                    <strong>Identity read paused.</strong>
+                    <p>{account.readError ?? 'Monad did not return a safe account read.'} Mint controls stay hidden until the read succeeds.</p>
+                  </div>
                 ) : account.tokenId === null ? (
                   <div className="workspace-empty">
                     <span className="workspace-empty__icon"><Icon name="orbit" size={23} /></span>
@@ -1498,13 +1868,22 @@ function App() {
                   </div>
                 ) : (
                    <div className="identity-summary">
+                     {account.readError && (
+                       <div className="workspace-rail-note workspace-rail-note--error">
+                         <span className="meta-check meta-check--degraded"><Icon name="bolt" size={12} /></span>
+                         <span>Live refresh paused. Showing the last successful identity read. {account.readError}</span>
+                       </div>
+                     )}
                      <div className="identity-summary__hero">
                        <IdentityNftArtwork imageUri={account.identityImage} alt={identityArtworkAlt} className="identity-summary__monogram" decorative />
                        <div>
-                         <span className="panel-kicker">S9ID / TOKEN {account.tokenId.toString().padStart(4, '0')}</span>
-                         <h3>{account.name || 'Unnamed identity'}</h3>
-                         <p>{account.handle ? `@${account.handle}` : 'No payment handle registered'}</p>
-                       </div>
+                          <span className="panel-kicker">S9ID / TOKEN {account.tokenId.toString().padStart(4, '0')}</span>
+                          <h3>{account.name || 'Unnamed identity'}</h3>
+                          <p>{account.handle ? `@${account.handle}` : 'No payment handle registered'}</p>
+                          <p className="identity-summary__bio">
+                            <span>BIO</span>{account.bio === null ? PENDING : account.bio || 'No bio registered'}
+                          </p>
+                        </div>
                      </div>
                      <div className="identity-summary__preview">
                        <div className="identity-summary__preview-header">
@@ -1519,24 +1898,12 @@ function App() {
                       <div><dt>REPUTATION</dt><dd>{account.reputation === null ? PENDING : account.reputation.toLocaleString('en-US')}</dd></div>
                       <div><dt>TOKEN ID</dt><dd>#{account.tokenId.toString()}</dd></div>
                     </dl>
-                    <div className="identity-summary__wallet">
-                      <span className="workspace-row-icon"><Icon name="wallet" size={16} /></span>
-                      <span><small>SMART WALLET</small><strong>{account.smartWallet ? shortenAddress(account.smartWallet) : 'Not deployed'}</strong></span>
-                      <span className="identity-summary__wallet-state">{account.smartWallet ? 'LIVE' : 'PREDICTED'}</span>
-                    </div>
-                    <div className="identity-summary__wallet-address">
-                      {account.smartWallet
-                        ? account.smartWallet
-                        : account.predictedWallet
-                          ? `Future address ${shortenAddress(account.predictedWallet)}`
-                          : 'Wallet factory read unavailable'}
-                    </div>
-                     <div className="identity-summary__footer">
+                      <div className="identity-summary__footer">
                        <span>NFT rewards <strong className="token-value"><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></strong></span>
                       <button
                         className="workspace-button workspace-button--small"
                         type="button"
-                         disabled={wallet.connecting || wallet.switching || actionLabel !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n}
+                          disabled={!accountReadReady || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n}
                         onClick={() => void handleClaimNFTRewards()}
                       >
                         Claim rewards <ButtonArrow />
@@ -1551,13 +1918,18 @@ function App() {
 
               <article className="workspace-panel identity-action-panel" id="identity-form">
                 <div className="workspace-panel__header">
-                  <div><span className="panel-kicker">IDENTITY CONTROL</span><strong>{account.tokenId === null ? 'Mint your identity' : 'Manage your identity'}</strong></div>
+                  <div><span className="panel-kicker">IDENTITY CONTROL</span><strong>{account.readStatus === 'error' ? 'Read paused' : account.tokenId === null ? 'Mint your identity' : 'Manage your identity'}</strong></div>
                   <Icon name="diamond" size={19} />
                 </div>
 
                 {!connected || account.loading ? (
                   <div className="workspace-rail-note">
                     <span className="detail-dot" />Connect and wait for the account read before writing identity state.
+                  </div>
+                ) : account.readStatus === 'error' ? (
+                  <div className="workspace-rail-note workspace-rail-note--error">
+                    <span className="meta-check meta-check--degraded"><Icon name="bolt" size={12} /></span>
+                    <span><strong>Account read paused.</strong> {account.readError ?? 'Monad did not return a safe account read.'} Writing controls remain disabled until the next successful refresh.</span>
                   </div>
                 ) : account.tokenId === null ? (
                   <form className="workspace-form" onSubmit={(event) => void handleMintIdentity(event)}>
@@ -1586,34 +1958,113 @@ function App() {
                     </div>
                     {mintFeeInsufficient && <p className="workspace-form__error">This wallet needs more {symbol} to cover the live mint fee.</p>}
                     <p className="workspace-form__note">SER9 approval is confirmed first, then the identity mint is submitted. Both receipts must succeed.</p>
-                     <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || mintFeeInsufficient}>
+                      <button className="workspace-button workspace-button--gold" type="submit" disabled={!accountReadReady || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || mintFeeInsufficient}>
                       {actionLabel ? actionLabel : 'Approve & mint identity'} <ButtonArrow />
                     </button>
                   </form>
-                ) : (
-                  <div className="workspace-form">
-                    <div className="workspace-rail-note workspace-rail-note--positive"><span className="meta-check"><Icon name="check" size={12} /></span> Identity #{account.tokenId.toString()} is owned by this wallet.</div>
-                    <form className="workspace-inline-form" onSubmit={(event) => void handleSetIdentityHandle(event)}>
-                      <label className="workspace-field">
-                        <span>Update payment handle</span>
-                        <input value={identityHandle} maxLength={32} onChange={(event) => setIdentityHandle(event.target.value)} placeholder={account.handle || 'new-handle'} />
-                      </label>
-                       <button className="workspace-button workspace-button--ink" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null}>Set handle <ButtonArrow /></button>
-                    </form>
-                    {!account.smartWallet && (
-                      <div className="workspace-action-row">
-                        <div><span className="panel-kicker">CREATE2 FACTORY</span><strong>Deploy the smart wallet</strong><p>Permissionless deployment at the predicted address for this token.</p></div>
-                         <button className="workspace-button workspace-button--outline" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleCreateIdentityWallet()}>Create wallet <ButtonArrow /></button>
-                      </div>
-                    )}
-                     <div className="workspace-action-row workspace-action-row--muted">
-                       <div><span className="panel-kicker">REPUTATION REWARDS</span><strong>Claim NFT rewards</strong><p className="token-copy"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol} currently attributable to this identity.</span></p></div>
-                       <button className="workspace-button workspace-button--outline" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n} onClick={() => void handleClaimNFTRewards()}>Claim <ButtonArrow /></button>
-                    </div>
+                ) : !account.profileReadReady ? (
+                  <div className="workspace-rail-note workspace-rail-note--error">
+                    <span className="meta-check meta-check--degraded"><Icon name="bolt" size={12} /></span>
+                    <span><strong>Profile read paused.</strong> The complete `profiles()` tuple is not available yet. Writing stays disabled until it is read in full.</span>
                   </div>
-                )}
-              </article>
-            </div>
+                ) : (
+                   <>
+                   <div className="workspace-form">
+                     <div className="workspace-rail-note workspace-rail-note--positive"><span className="meta-check"><Icon name="check" size={12} /></span> Identity #{account.tokenId.toString()} is owned by this wallet.</div>
+                   </div>
+                   <form className="workspace-form workspace-form--profile" onSubmit={(event) => void handleUpdateIdentityProfile(event)}>
+                     <div className="workspace-form__intro">
+                       <span className="panel-kicker">ONCHAIN PROFILE</span>
+                       <strong>Update profile</strong>
+                     </div>
+                     <label className="workspace-field">
+                       <span>Name <i className={utf8ByteLength(profileName) > 32 ? 'is-invalid' : undefined}>{utf8ByteLength(profileName)} / 32 bytes</i></span>
+                       <input value={profileName} maxLength={32} onChange={(event) => setProfileName(event.target.value)} placeholder="A name people can remember" />
+                     </label>
+                     <label className="workspace-field">
+                       <span>Bio <i className={utf8ByteLength(profileBio) > 128 ? 'is-invalid' : undefined}>{utf8ByteLength(profileBio)} / 128 bytes</i></span>
+                       <textarea value={profileBio} maxLength={128} onChange={(event) => setProfileBio(event.target.value)} placeholder="A short line about your signal" rows={4} />
+                     </label>
+                     <p className="workspace-form__note">Name and BIO are written onchain. Current hue and saturation are preserved from the profile read; nothing is saved locally.</p>
+                      <button className="workspace-button workspace-button--gold" type="submit" disabled={!profileDraftReady || !profileName.trim() || utf8ByteLength(profileName) > 32 || utf8ByteLength(profileBio) > 128 || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || account.hue === null || account.saturation === null}>
+                       {actionLabel ?? 'Update profile'} <ButtonArrow />
+                     </button>
+                   </form>
+                   <form className="workspace-inline-form" onSubmit={(event) => void handleSetIdentityHandle(event)}>
+                       <label className="workspace-field">
+                         <span>Update payment handle</span>
+                         <input value={identityHandle} maxLength={32} onChange={(event) => setIdentityHandle(event.target.value)} placeholder={account.handle || 'new-handle'} />
+                       </label>
+                          <button className="workspace-button workspace-button--ink" type="submit" disabled={!accountReadReady || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null}>Set handle <ButtonArrow /></button>
+                     </form>
+                      <div className="workspace-action-row workspace-action-row--muted">
+                        <div><span className="panel-kicker">REPUTATION REWARDS</span><strong>Claim NFT rewards</strong><p className="token-copy"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol} currently attributable to this identity.</span></p></div>
+                        <button className="workspace-button workspace-button--outline" type="button" disabled={!accountReadReady || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n} onClick={() => void handleClaimNFTRewards()}>Claim <ButtonArrow /></button>
+                     </div>
+                   </>
+                 )}
+               </article>
+
+               <article className="workspace-panel smart-wallet-panel">
+                 <div className="workspace-panel__header">
+                   <div><span className="panel-kicker">IDENTITY SMART WALLET</span><strong>Keep control close.</strong></div>
+                   <Icon name="wallet" size={19} />
+                 </div>
+
+                 {!connected ? (
+                   <div className="workspace-empty workspace-empty--compact">
+                     <span className="workspace-status__pulse" />Connect a wallet to read the identity wallet state.
+                   </div>
+                  ) : account.loading ? (
+                    <div className="workspace-empty workspace-empty--compact">
+                      <span className="workspace-status__pulse" />Reading the deterministic wallet address from Monad...
+                    </div>
+                  ) : account.readStatus === 'error' ? (
+                    <div className="workspace-empty workspace-empty--compact workspace-empty--error">
+                      <span className="workspace-status__pulse" /><span>Smart wallet reads paused. {account.readError ?? 'Monad did not return safe wallet state.'}</span>
+                    </div>
+                  ) : account.tokenId === null ? (
+                    <div className="workspace-empty workspace-empty--compact">
+                      <span className="workspace-status__pulse" />Mint an identity before managing its smart wallet.
+                    </div>
+                  ) : (
+                    <div className="smart-wallet-panel__body">
+                      <div className={`smart-wallet-state${smartWalletLive ? ' smart-wallet-state--deployed' : ''}`} role="status" aria-live="polite">
+                        <span className="smart-wallet-state__icon"><Icon name={smartWalletLive ? 'check' : 'orbit'} size={18} /></span>
+                        <div>
+                          <span className="panel-kicker">{smartWalletLive ? 'DEPLOYED' : smartWalletPredictionAvailable ? 'PREDICTED' : 'UNAVAILABLE'}</span>
+                          <strong>{smartWalletLive ? 'Smart wallet is live.' : smartWalletPredictionAvailable ? 'Ready to deploy.' : 'Address read unavailable.'}</strong>
+                          <p>{smartWalletLive ? 'The wallet is deployed at the deterministic address for this identity.' : smartWalletPredictionAvailable ? smartWalletCreatePending ? unresolvedSubmittedTransaction ? 'The submitted transaction status is uncertain. Verify it before acknowledging the workspace warning.' : 'Creation confirmed. Waiting for the live wallet read before allowing another transaction.' : 'Create the wallet when you are ready; deployment is permissionless.' : 'Both wallet reads must complete before deployment can be offered.'}</p>
+                        </div>
+                      </div>
+
+                     <div className="smart-wallet-address">
+                       <span className="panel-kicker">FULL SMART WALLET ADDRESS</span>
+                       <code>{smartWalletAddress ?? 'Wallet factory read unavailable'}</code>
+                     </div>
+
+                      <div className="smart-wallet-actions">
+                       <button className="workspace-button workspace-button--outline" type="button" aria-label="Copy smart wallet address" disabled={!smartWalletAddress || !smartWalletReadsAvailable || account.loading} onClick={() => void handleCopySmartWalletAddress()}>
+                         <Icon name="copy" size={15} /> Copy address
+                       </button>
+                       {smartWalletAddress && (
+                         <a className="workspace-button workspace-button--outline" href={explorerAddressUrl(smartWalletAddress)} target="_blank" rel="noreferrer">
+                           Open explorer <ButtonArrow />
+                         </a>
+                       )}
+                     </div>
+
+                     <p className="smart-wallet-panel__note"><Icon name="lock" size={15} /><span><strong>NFT ownership controls this smart wallet.</strong> This workspace only reads its state and deploys the deterministic wallet. Arbitrary execute controls are not exposed.</span></p>
+
+                     {!smartWalletLive && smartWalletReadsAvailable && smartWalletPredictionAvailable && (
+                        <button className="workspace-button workspace-button--gold smart-wallet-panel__create" type="button" disabled={smartWalletCreatePending || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null} onClick={() => void handleCreateIdentityWallet()}>
+                         {smartWalletCreatePending ? 'Waiting for live read' : 'Create smart wallet'} <ButtonArrow />
+                       </button>
+                     )}
+                   </div>
+                 )}
+               </article>
+             </div>
           </div>
           </section>
         )}
@@ -1632,6 +2083,14 @@ function App() {
             {actionLabel && (
               <div className="workspace-status" role="status" aria-live="polite">
                 <span className="workspace-status__pulse" />{actionLabel}
+              </div>
+            )}
+
+            {renderUnresolvedTransactionBanner()}
+
+            {stakingReadBlocked && (
+              <div className="workspace-banner" role="status">
+                <span><strong>Staking writes paused.</strong> {account.readStatus === 'error' ? 'The connected account read failed.' : 'Balances and unstake requests are still loading.'} Writes resume after a fresh account read.</span>
               </div>
             )}
 
@@ -1687,15 +2146,15 @@ function App() {
                          </span>
                            <div className="amount-input-wrap"><input ref={stakingAmountInputRef} inputMode="decimal" value={stakingAmount} onChange={handleStakingAmountChange} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{symbol}</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
                        </label>
-                      <div className="workspace-action-grid">
-                         <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canStakeSelected}>Approve & stake <ButtonArrow /></button>
-                         <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canUnstakeSelected} onClick={() => void handleUnstakeSer9()}>Request unstake <ButtonArrow /></button>
-                      </div>
+                       <div className="workspace-action-grid">
+                           <button className="workspace-button workspace-button--gold" type="submit" disabled={stakingReadBlocked || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || !canStakeSelected}>Approve & stake <ButtonArrow /></button>
+                           <button className="workspace-button workspace-button--ink" type="button" disabled={stakingReadBlocked || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || !canUnstakeSelected} onClick={() => void handleUnstakeSer9()}>Request unstake <ButtonArrow /></button>
+                       </div>
                     </form>
                     <div className="unstake-note"><span className="workspace-row-icon"><Icon name="lock" size={15} /></span><span><strong>Epoch delayed</strong><small>Unstake creates a request first. SER9 becomes claimable after the protocol delay.</small></span></div>
                      <div className="request-control">
                        <div><span className="panel-kicker">SER9 REQUESTS</span><small>{account.ser9UnstakeRequestCount === null ? 'Reading request count...' : `${account.ser9UnstakeRequestCount.toString()} request${account.ser9UnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
-                        <div className="request-control__form"><input inputMode="numeric" value={ser9RequestId} onChange={(event) => setSer9RequestId(event.target.value)} placeholder={account.ser9LatestUnstakeRequestId === null ? 'request id' : `latest ${account.ser9LatestUnstakeRequestId.toString()}`} aria-label="SER9 unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || ser9ClaimRequestId === null} onClick={() => void handleClaimSer9Unstaked()}>Claim <ButtonArrow /></button></div>
+                          <div className="request-control__form"><input inputMode="numeric" value={ser9RequestId} onChange={(event) => setSer9RequestId(event.target.value)} placeholder={account.ser9LatestUnstakeRequestId === null ? 'request id' : `latest ${account.ser9LatestUnstakeRequestId.toString()}`} aria-label="SER9 unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={stakingReadBlocked || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || ser9ClaimRequestId === null || (ser9RequestId.trim() === '' && !account.ser9LatestUnstakeRequestReady)} onClick={() => void handleClaimSer9Unstaked()}>Claim <ButtonArrow /></button></div>
                        {account.ser9LatestUnstakeRequest && (
                          <small className="request-control__detail">
                            <span className="token-value">
@@ -1707,7 +2166,7 @@ function App() {
                        )}
                        <small className="request-control__hint">Blank uses the latest request. It must have passed its minimum claim epoch.</small>
                      </div>
-                      <button className="workspace-button workspace-button--outline workspace-button--full" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || account.stakingRewards === null || account.stakingRewards === 0n} onClick={() => void handleClaimSer9Rewards()}>Claim earned rewards <span className="token-value"><span>{tokenAmount(account.stakingRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></span> <ButtonArrow /></button>
+                        <button className="workspace-button workspace-button--outline workspace-button--full" type="button" disabled={stakingReadBlocked || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || account.stakingRewards === null || account.stakingRewards === 0n} onClick={() => void handleClaimSer9Rewards()}>Claim earned rewards <span className="token-value"><span>{tokenAmount(account.stakingRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></span> <ButtonArrow /></button>
                   </div>
                 ) : (
                   <div className="staking-tab-panel" role="tabpanel">
@@ -1721,16 +2180,16 @@ function App() {
                            </i>
                          </span>
                            <div className="amount-input-wrap"><input ref={stakingAmountInputRef} inputMode="decimal" value={stakingAmount} onChange={handleStakingAmountChange} placeholder="0.00" /><span className="amount-input-wrap__token token-label"><TokenLogo token="MON" /><span>MON</span></span><button type="button" onClick={handleMaxAmount}>MAX</button></div>
-                      </label>
-                      <div className="workspace-action-grid">
-                         <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canStakeSelected}>Stake MON <ButtonArrow /></button>
-                         <button className="workspace-button workspace-button--ink" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || !canUnstakeSelected} onClick={() => void handleUnstakeMonad()}>Request unstake <ButtonArrow /></button>
-                      </div>
+                       </label>
+                       <div className="workspace-action-grid">
+                           <button className="workspace-button workspace-button--gold" type="submit" disabled={stakingReadBlocked || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || !canStakeSelected}>Stake MON <ButtonArrow /></button>
+                           <button className="workspace-button workspace-button--ink" type="button" disabled={stakingReadBlocked || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || !canUnstakeSelected} onClick={() => void handleUnstakeMonad()}>Request unstake <ButtonArrow /></button>
+                       </div>
                     </form>
                     <div className="unstake-note"><span className="workspace-row-icon"><Icon name="lock" size={15} /></span><span><strong>Native MON, epoch covered</strong><small>MON is delegated through Monad staking. Coverage and the epoch delay must clear before a claim can settle.</small></span></div>
                      <div className="request-control">
                        <div><span className="panel-kicker">MON REQUESTS</span><small>{account.monadUnstakeRequestCount === null ? 'Reading request count...' : `${account.monadUnstakeRequestCount.toString()} request${account.monadUnstakeRequestCount === 1n ? '' : 's'}`}</small></div>
-                        <div className="request-control__form"><input inputMode="numeric" value={monadRequestId} onChange={(event) => setMonadRequestId(event.target.value)} placeholder={account.monadLatestUnstakeRequestId === null ? 'request id' : `latest ${account.monadLatestUnstakeRequestId.toString()}`} aria-label="MON unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null || monadClaimRequestId === null} onClick={() => void handleClaimMonadUnstaked()}>Claim <ButtonArrow /></button></div>
+                          <div className="request-control__form"><input inputMode="numeric" value={monadRequestId} onChange={(event) => setMonadRequestId(event.target.value)} placeholder={account.monadLatestUnstakeRequestId === null ? 'request id' : `latest ${account.monadLatestUnstakeRequestId.toString()}`} aria-label="MON unstake request id" /><button className="workspace-button workspace-button--small" type="button" disabled={stakingReadBlocked || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || monadClaimRequestId === null || (monadRequestId.trim() === '' && !account.monadLatestUnstakeRequestReady)} onClick={() => void handleClaimMonadUnstaked()}>Claim <ButtonArrow /></button></div>
                        {account.monadLatestUnstakeRequest && (
                          <small className="request-control__detail">
                            <span className="token-value">
@@ -1762,13 +2221,15 @@ function App() {
                <p>Identity moderation is deliberately narrow: confirm an identity and tune its reputation signal, with every change signed on Monad.</p>
              </div>
 
-             {actionLabel && (
-               <div className="workspace-status" role="status" aria-live="polite">
-                 <span className="workspace-status__pulse" />{actionLabel}
-               </div>
-             )}
+              {actionLabel && (
+                <div className="workspace-status" role="status" aria-live="polite">
+                  <span className="workspace-status__pulse" />{actionLabel}
+                </div>
+              )}
 
-             {connected && !wallet.onMonad && (
+              {renderUnresolvedTransactionBanner()}
+
+              {connected && !wallet.onMonad && (
                <div className="workspace-banner">
                  <span><strong>Wrong network.</strong> Moderator writes are available on {MONAD.name} only.</span>
                  <button className="workspace-button workspace-button--small" type="button" disabled={wallet.connecting || wallet.switching || actionLabel !== null} onClick={() => void handleSwitchNetwork()}>
@@ -1873,7 +2334,7 @@ function App() {
                        </div>
                      </div>
                      <p className="workspace-form__note">Calls <code>verify(tokenId, status)</code> on Series9Identity. This does not change ownership.</p>
-                      <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null}>
+                      <button className="workspace-button workspace-button--gold" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null}>
                        {actionLabel ?? `${moderatorVerification === 'verified' ? 'Verify' : 'Unverify'} identity`} <ButtonArrow />
                      </button>
                    </form>
@@ -1894,7 +2355,7 @@ function App() {
                        <input inputMode="numeric" value={reputationScore} onChange={(event) => setReputationScore(event.target.value)} placeholder="e.g. 750,000" aria-label="Reputation score" min="1" max="1000000" />
                      </label>
                      <p className="workspace-form__note">Scores are checked in the browser before <code>setReputationScore(tokenId, newScore)</code> is signed.</p>
-                      <button className="workspace-button workspace-button--ink" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null}>
+                       <button className="workspace-button workspace-button--ink" type="submit" disabled={wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null}>
                        {actionLabel ?? 'Set reputation score'} <ButtonArrow />
                      </button>
                    </form>

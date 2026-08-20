@@ -48,6 +48,7 @@ const QUANTITY_PATTERN = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const TRANSACTION_DATA_PATTERN = /^0x(?:[0-9a-fA-F]{2})*$/;
 const DEFAULT_WAIT_TIMEOUT_MS = 120_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
+const RECEIPT_REQUEST_TIMEOUT_MS = 12_000;
 const DISCONNECTED_MESSAGE = 'Wallet disconnected. Reconnect your wallet to continue.';
 const NO_ACCOUNT_MESSAGE = 'No wallet account is available. Unlock or select an account in your wallet.';
 const SESSION_CHANGED_MESSAGE = 'Wallet session changed during the transaction request. Verify the transaction before retrying.';
@@ -239,6 +240,25 @@ function validateTransactionData(value: string | undefined): void {
 
 function decodeRpcQuantity(value: unknown, label: string): bigint {
   return readQuantity(value, label);
+}
+
+function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      reject(new Error('Timed out reading the transaction receipt.'));
+    }, timeoutMs);
+
+    void request.then(
+      (value) => {
+        globalThis.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error: unknown) => {
+        globalThis.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** Wallet connection over the single injected EIP-1193 provider. */
@@ -819,7 +839,10 @@ export function useWallet(): WalletState {
       while (Date.now() - startedAt < timeoutMs) {
         let receiptResult: unknown;
         try {
-          receiptResult = await provider.request({ method: 'eth_getTransactionReceipt', params: [hash] });
+          receiptResult = await withTimeout(
+            provider.request({ method: 'eth_getTransactionReceipt', params: [hash] }),
+            RECEIPT_REQUEST_TIMEOUT_MS,
+          );
         } catch (receiptError) {
           throw new Error(normalizeProviderError(receiptError, 'Could not read the transaction receipt.'));
         }

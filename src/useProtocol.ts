@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   CONTRACTS,
   SELECTOR,
@@ -6,7 +6,9 @@ import {
   callWithAddressAndUint,
   callWithUint,
   decodeAddress,
+  decodeAddressRead,
   decodeBool,
+  decodeProfiles,
   decodeString,
   decodeUint,
   ethCall,
@@ -48,6 +50,11 @@ export type ProtocolStats = {
 
 export type AccountStats = {
   loading: boolean;
+  readStatus: 'idle' | 'loading' | 'ready' | 'error';
+  readError: string | null;
+  profileReadReady: boolean;
+  walletOfReadReady: boolean;
+  predictedWalletReadReady: boolean;
   monBalance: bigint | null;
   ser9Balance: bigint | null;
   identityOwner: boolean | null;
@@ -55,11 +62,15 @@ export type AccountStats = {
   tokenId: bigint | null;
   identityImage: string | null;
   name: string | null;
+  bio: string | null;
   handle: string | null;
   smartWallet: string | null;
   predictedWallet: string | null;
   entityType: bigint | null;
+  hue: bigint | null;
+  saturation: bigint | null;
   verified: boolean | null;
+  registeredAt: bigint | null;
   reputation: bigint | null;
   staked: bigint | null;
   stakingRewards: bigint | null;
@@ -69,9 +80,11 @@ export type AccountStats = {
   ser9UnstakeRequestCount: bigint | null;
   ser9LatestUnstakeRequestId: bigint | null;
   ser9LatestUnstakeRequest: UnstakeRequest | null;
+  ser9LatestUnstakeRequestReady: boolean;
   monadUnstakeRequestCount: bigint | null;
   monadLatestUnstakeRequestId: bigint | null;
   monadLatestUnstakeRequest: UnstakeRequest | null;
+  monadLatestUnstakeRequestReady: boolean;
   /** Legacy alias retained for consumers of the first live-read build. */
   pendingRewards: bigint | null;
 };
@@ -85,6 +98,11 @@ export type UnstakeRequest = {
 
 const EMPTY_ACCOUNT: AccountStats = {
   loading: false,
+  readStatus: 'idle',
+  readError: null,
+  profileReadReady: false,
+  walletOfReadReady: false,
+  predictedWalletReadReady: false,
   monBalance: null,
   ser9Balance: null,
   identityOwner: null,
@@ -92,11 +110,15 @@ const EMPTY_ACCOUNT: AccountStats = {
   tokenId: null,
   identityImage: null,
   name: null,
+  bio: null,
   handle: null,
   smartWallet: null,
   predictedWallet: null,
   entityType: null,
+  hue: null,
+  saturation: null,
   verified: null,
+  registeredAt: null,
   reputation: null,
   staked: null,
   stakingRewards: null,
@@ -106,11 +128,39 @@ const EMPTY_ACCOUNT: AccountStats = {
   ser9UnstakeRequestCount: null,
   ser9LatestUnstakeRequestId: null,
   ser9LatestUnstakeRequest: null,
+  ser9LatestUnstakeRequestReady: false,
   monadUnstakeRequestCount: null,
   monadLatestUnstakeRequestId: null,
   monadLatestUnstakeRequest: null,
+  monadLatestUnstakeRequestReady: false,
   pendingRewards: null,
 };
+
+type AccountSessionSnapshot = { address: string | null; id: number };
+
+type AccountSessionStore = {
+  getSnapshot: () => AccountSessionSnapshot;
+  subscribe: (listener: () => void) => () => void;
+  setAddress: (address: string | null) => void;
+};
+
+function createAccountSessionStore(address: string | null): AccountSessionStore {
+  let snapshot: AccountSessionSnapshot = { address, id: 0 };
+  const listeners = new Set<() => void>();
+
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    setAddress: (nextAddress) => {
+      if (snapshot.address === nextAddress) return;
+      snapshot = { address: nextAddress, id: snapshot.id + 1 };
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
 
 /**
  * Identity is a plain ERC-721 (no Enumerable, `_nextTokenId` is private), so
@@ -358,8 +408,24 @@ function decodeUnstakeRequest(result: unknown): UnstakeRequest | null {
   return { amount, requestEpoch, minClaimEpoch, claimed };
 }
 
-export function useAccount(address: string | null, blockNumber: bigint | null): AccountStats {
-  const [snapshot, setSnapshot] = useState<{ address: string; tick: number; data: AccountStats } | null>(null);
+export function useAccount(address: string | null, blockNumber: bigint | null, refreshVersion: number): AccountStats {
+  const [snapshot, setSnapshot] = useState<{
+    address: string;
+    session: number;
+    tick: number;
+    refreshVersion: number;
+    data: AccountStats;
+  } | null>(null);
+  const [accountSessionStore] = useState(() => createAccountSessionStore(address));
+  const accountSession = useSyncExternalStore(
+    accountSessionStore.subscribe,
+    accountSessionStore.getSnapshot,
+    accountSessionStore.getSnapshot,
+  );
+
+  useEffect(() => {
+    accountSessionStore.setAddress(address);
+  }, [accountSessionStore, address]);
 
   // Re-read roughly once per poll tick rather than on every new block.
   const tick = blockNumber === null ? 0 : Number(blockNumber / 100n);
@@ -391,7 +457,11 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
       ).catch(() => [null, null]),
     ]);
 
-    const tokenId = decodeUint(results[2]);
+    const accountReads = results.slice(0, 11).map((result) => decodeUint(result));
+    if (accountReads.some((value) => value === null)) throw new Error('Account read incomplete.');
+
+    const tokenId = accountReads[2];
+    if (tokenId === null) throw new Error('Identity ownership read unavailable.');
     const hasIdentity = tokenId !== null && tokenId > 0n;
     const ownerAddress = decodeAddress(permissionResults[0]);
     const identityOwner = ownerAddress === null ? null : ownerAddress.toLowerCase() === target.toLowerCase();
@@ -412,10 +482,11 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
             callWithUint(CONTRACTS.identity, SELECTOR.getEntityType, tokenId),
             callWithUint(CONTRACTS.identity, SELECTOR.isVerified, tokenId),
             callWithUint(CONTRACTS.identity, SELECTOR.tokenURI, tokenId),
+            callWithUint(CONTRACTS.identity, SELECTOR.profiles, tokenId),
           ],
           signal,
-        ).catch(() => [null, null, null, null, null, null, null])
-      : [null, null, null, null, null, null, null];
+        )
+      : [null, null, null, null, null, null, null, null];
 
     const ser9UnstakeRequestCount = decodeUint(results[9]);
     const monadUnstakeRequestCount = decodeUint(results[10]);
@@ -438,24 +509,45 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
     const monadLatestUnstakeRequest = monadUnstakeRequestCount !== null && monadUnstakeRequestCount > 0n
       ? decodeUnstakeRequest(requestResults[requestIndex])
       : null;
+    const ser9LatestUnstakeRequestReady = ser9UnstakeRequestCount === 0n || ser9LatestUnstakeRequest !== null;
+    const monadLatestUnstakeRequestReady = monadUnstakeRequestCount === 0n || monadLatestUnstakeRequest !== null;
 
     const pendingNFTRewards = decodeUint(results[5]);
     const identityImage = extractIdentityImage(decodeString(identityResults[6]));
+    const profile = decodeProfiles(identityResults[7]);
+    const handle = decodeString(identityResults[1]);
+    const walletOfRead = hasIdentity ? decodeAddressRead(identityResults[2]) : null;
+    const predictedWalletRead = hasIdentity ? decodeAddressRead(identityResults[3]) : null;
+
+    if (hasIdentity && profile === null) throw new Error('Identity profile read unavailable.');
+    if (hasIdentity && handle === null) throw new Error('Identity handle read unavailable.');
+    if (hasIdentity && (!walletOfRead?.ready || !predictedWalletRead?.ready)) {
+      throw new Error('Smart wallet address reads unavailable.');
+    }
 
     return {
       loading: false,
+      readStatus: 'ready',
+      readError: null,
+      profileReadReady: hasIdentity && profile !== null,
+      walletOfReadReady: walletOfRead?.ready ?? false,
+      predictedWalletReadReady: predictedWalletRead?.ready ?? false,
       monBalance: decodeUint(results[0]),
       ser9Balance: decodeUint(results[1]),
       identityOwner,
       identityModerator,
       tokenId: hasIdentity ? tokenId : null,
       identityImage: hasIdentity ? identityImage : null,
-      name: decodeString(identityResults[0]),
-      handle: decodeString(identityResults[1]),
-      smartWallet: decodeAddress(identityResults[2]),
-      predictedWallet: decodeAddress(identityResults[3]),
-      entityType: decodeUint(identityResults[4]),
-      verified: decodeBool(identityResults[5]),
+      name: profile?.name ?? null,
+      bio: profile?.bio ?? null,
+      handle: hasIdentity ? handle : null,
+      smartWallet: walletOfRead?.address ?? null,
+      predictedWallet: predictedWalletRead?.address ?? null,
+      entityType: profile?.entityType ?? decodeUint(identityResults[4]),
+      hue: profile?.hue ?? null,
+      saturation: profile?.saturation ?? null,
+      verified: profile?.verified ?? decodeBool(identityResults[5]),
+      registeredAt: profile?.registeredAt ?? null,
       reputation: decodeUint(results[3]),
       staked: decodeUint(results[4]),
       stakingRewards: decodeUint(results[6]),
@@ -466,10 +558,12 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
       ser9LatestUnstakeRequestId:
         ser9UnstakeRequestCount !== null && ser9UnstakeRequestCount > 0n ? ser9UnstakeRequestCount - 1n : null,
       ser9LatestUnstakeRequest,
+      ser9LatestUnstakeRequestReady,
       monadUnstakeRequestCount,
       monadLatestUnstakeRequestId:
         monadUnstakeRequestCount !== null && monadUnstakeRequestCount > 0n ? monadUnstakeRequestCount - 1n : null,
       monadLatestUnstakeRequest,
+      monadLatestUnstakeRequestReady,
       pendingRewards: pendingNFTRewards,
     };
   }, []);
@@ -478,25 +572,58 @@ export function useAccount(address: string | null, blockNumber: bigint | null): 
     if (!address) return;
 
     const controller = new AbortController();
+    const requestSession = accountSession.id;
     const requestTick = tick;
+    const requestRefreshVersion = refreshVersion;
 
     void load(address, controller.signal)
       .then((data) => {
-        if (controller.signal.aborted) return;
-        setSnapshot({ address, tick: requestTick, data });
+        if (controller.signal.aborted || accountSessionStore.getSnapshot().id !== requestSession) return;
+        setSnapshot({ address, session: requestSession, tick: requestTick, refreshVersion: requestRefreshVersion, data });
       })
-      .catch(() => {
-        if (controller.signal.aborted) return;
-        setSnapshot({ address, tick: requestTick, data: EMPTY_ACCOUNT });
+      .catch((readError) => {
+        if (controller.signal.aborted || accountSessionStore.getSnapshot().id !== requestSession) return;
+        const message = readError instanceof Error ? readError.message : 'Monad account read unavailable.';
+        setSnapshot((previous) => {
+          const previousData = previous?.address === address && previous.session === requestSession
+            ? previous.data
+            : EMPTY_ACCOUNT;
+          return {
+            address,
+            session: requestSession,
+            tick: requestTick,
+            refreshVersion: requestRefreshVersion,
+            data: {
+              ...previousData,
+              loading: false,
+              readStatus: 'error',
+              readError: message,
+            },
+          };
+        });
       });
 
     return () => controller.abort();
-  }, [address, tick, load]);
+  }, [accountSession.id, accountSessionStore, address, load, refreshVersion, tick]);
 
   if (!address) return EMPTY_ACCOUNT;
-  if (snapshot?.address !== address) return { ...EMPTY_ACCOUNT, loading: true };
+  if (
+    accountSession.address !== address ||
+    snapshot?.address !== address ||
+    snapshot.session !== accountSession.id ||
+    snapshot.refreshVersion !== refreshVersion
+  ) {
+    return { ...EMPTY_ACCOUNT, loading: true, readStatus: 'loading' };
+  }
   if (snapshot.tick !== tick) {
-    return { ...snapshot.data, loading: true, identityOwner: null, identityModerator: null };
+    return {
+      ...snapshot.data,
+      loading: true,
+      readStatus: 'loading',
+      readError: null,
+      identityOwner: null,
+      identityModerator: null,
+    };
   }
   return snapshot.data;
 }

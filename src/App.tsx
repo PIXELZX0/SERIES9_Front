@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
   CONTRACTS,
   MONAD,
@@ -26,11 +26,12 @@ import {
 } from './chain.ts';
 import { useWallet } from './useWallet.ts';
 import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from './useProtocol.ts';
+import DexPage from './DexPage.tsx';
 
 type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'wallet';
-type SectionId = 'overview' | 'identity' | 'staking' | 'tokenomics' | 'moderator' | 'pulse';
-type SiteRoute = '/' | '/identity' | '/staking' | '/tokenomics' | '/moderator';
-type Page = 'home' | 'identity' | 'staking' | 'tokenomics' | 'moderator';
+type SectionId = 'overview' | 'identity' | 'staking' | 'tokenomics' | 'dex' | 'moderator' | 'pulse';
+type SiteRoute = '/' | '/identity' | '/staking' | '/tokenomics' | '/dex' | '/moderator';
+type Page = 'home' | 'identity' | 'staking' | 'tokenomics' | 'dex' | 'moderator';
 type TokenKind = 'SER9' | 'MON';
 type StakingAsset = TokenKind;
 type ToastKind = 'success' | 'error';
@@ -300,6 +301,10 @@ function walletAddressKey(address: string): string {
   return address.toLowerCase();
 }
 
+function sameTransactionHash(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -376,6 +381,12 @@ function persistUnresolvedSubmittedTransactions(transactions: UnresolvedSubmitte
   }
 }
 
+function persistSubmittedTransaction(transaction: UnresolvedSubmittedTransaction): void {
+  const transactions = readUnresolvedSubmittedTransactions();
+  transactions[walletAddressKey(transaction.walletAddress)] = transaction;
+  persistUnresolvedSubmittedTransactions(transactions);
+}
+
 function isKnownMinedRevert(error: unknown): boolean {
   return error instanceof Error && error.message === 'Transaction was mined but reverted on Monad.';
 }
@@ -395,6 +406,7 @@ function currentPage(pathname = window.location.pathname): Page {
   if (normalizedPath === '/identity') return 'identity';
   if (normalizedPath === '/staking') return 'staking';
   if (normalizedPath === '/tokenomics') return 'tokenomics';
+  if (normalizedPath === '/dex') return 'dex';
   if (normalizedPath === '/moderator') return 'moderator';
   return 'home';
 }
@@ -404,6 +416,7 @@ const navLinks: Array<{ label: string; href: string; id: SectionId }> = [
   { label: 'Identity', href: routeHref('/identity'), id: 'identity' },
   { label: 'Staking', href: routeHref('/staking'), id: 'staking' },
   { label: 'Tokenomics', href: routeHref('/tokenomics'), id: 'tokenomics' },
+  { label: 'DEX', href: routeHref('/dex'), id: 'dex' },
   { label: 'Moderator', href: routeHref('/moderator'), id: 'moderator' },
   { label: 'Pulse', href: routeHref('/', '#pulse'), id: 'pulse' },
 ];
@@ -1089,6 +1102,27 @@ function App() {
     persistUnresolvedSubmittedTransactions(nextTransactions);
   }
 
+  function clearUnresolvedSubmittedTransaction(walletAddress: string, expectedHash: string): boolean {
+    const key = walletAddressKey(walletAddress);
+    const storedTransactions = readUnresolvedSubmittedTransactions();
+    const storedTransaction = storedTransactions[key];
+    if (storedTransaction && !sameTransactionHash(storedTransaction.hash, expectedHash)) return false;
+
+    if (storedTransaction && sameTransactionHash(storedTransaction.hash, expectedHash)) {
+      delete storedTransactions[key];
+      persistUnresolvedSubmittedTransactions(storedTransactions);
+    }
+
+    const currentTransaction = unresolvedSubmittedTransactionsRef.current[key];
+    if (!currentTransaction || !sameTransactionHash(currentTransaction.hash, expectedHash)) return true;
+
+    const nextTransactions = { ...unresolvedSubmittedTransactionsRef.current };
+    delete nextTransactions[key];
+    unresolvedSubmittedTransactionsRef.current = nextTransactions;
+    setUnresolvedSubmittedTransactions(nextTransactions);
+    return true;
+  }
+
   function handleAcknowledgeUnresolvedTransaction() {
     if (!walletAddress) return;
 
@@ -1096,11 +1130,7 @@ function App() {
     const transaction = unresolvedSubmittedTransactionsRef.current[key];
     if (!transaction) return;
 
-    const nextTransactions = { ...unresolvedSubmittedTransactionsRef.current };
-    delete nextTransactions[key];
-    unresolvedSubmittedTransactionsRef.current = nextTransactions;
-    setUnresolvedSubmittedTransactions(nextTransactions);
-    persistUnresolvedSubmittedTransactions(nextTransactions);
+    if (!clearUnresolvedSubmittedTransaction(transaction.walletAddress, transaction.hash)) return;
     if (transaction.label === 'Create smart wallet') {
       smartWalletCreateKeyRef.current = null;
       setSmartWalletCreatePending(false);
@@ -1137,7 +1167,13 @@ function App() {
     setStakingAmount(formattedValue);
   }
 
-  function handleNavClick() {
+  function handleNavClick(event: MouseEvent<HTMLAnchorElement>) {
+    if (page === 'dex' && actionLabel !== null) {
+      event.preventDefault();
+      announceError('A DEX transaction is still being confirmed. Verify or acknowledge it before leaving this page.');
+      return;
+    }
+
     const shouldRestoreMenuFocus = menuOpen && window.matchMedia('(max-width: 820px)').matches;
     setMenuOpen(false);
 
@@ -1200,7 +1236,9 @@ function App() {
     const submittedWalletAddress = wallet.address;
     const unresolvedTransaction = submittedWalletAddress === null
       ? null
-      : unresolvedSubmittedTransactionsRef.current[walletAddressKey(submittedWalletAddress)] ?? null;
+      : unresolvedSubmittedTransactionsRef.current[walletAddressKey(submittedWalletAddress)] ??
+        readUnresolvedSubmittedTransactions()[walletAddressKey(submittedWalletAddress)] ??
+        null;
     if (unresolvedTransaction) {
       announceError(
         `Transaction ${shortenHash(unresolvedTransaction.hash)} is unresolved. Verify it before sending another wallet action.`,
@@ -1221,14 +1259,29 @@ function App() {
       setActionLabel(`${label} / waiting for wallet`);
       const hash = await wallet.sendTransaction(request);
       submittedHash = hash;
+      if (submittedWalletAddress !== null) {
+        persistSubmittedTransaction({
+          hash,
+          label,
+          walletAddress: submittedWalletAddress,
+        });
+      }
       setActionLabel(`${label} / pending`);
       announce(`${label} submitted ${shortenHash(hash)}. Waiting for Monad confirmation.`);
       await wallet.waitForTransaction(hash);
+      if (submittedWalletAddress !== null) {
+        clearUnresolvedSubmittedTransaction(submittedWalletAddress, hash);
+      }
       setAccountRefreshVersion((version) => version + 1);
       announce(`${label} confirmed. Live account data will refresh shortly.`);
       return true;
     } catch (actionError) {
       if (submittedHash !== null && submittedWalletAddress !== null && !isKnownMinedRevert(actionError)) {
+        persistSubmittedTransaction({
+          hash: submittedHash,
+          label,
+          walletAddress: submittedWalletAddress,
+        });
         rememberUnresolvedSubmittedTransaction({
           hash: submittedHash,
           label,
@@ -1238,6 +1291,9 @@ function App() {
           `${label} submitted ${shortenHash(submittedHash)}, but its receipt could not be verified. Do not retry until you verify the transaction.`,
         );
       } else {
+        if (submittedHash !== null && submittedWalletAddress !== null) {
+          clearUnresolvedSubmittedTransaction(submittedWalletAddress, submittedHash);
+        }
         announceError(actionError instanceof Error ? actionError.message : `${label} failed.`);
       }
       return false;
@@ -1698,6 +1754,15 @@ function App() {
     return page === 'home'
       ? (sectionId === 'overview' || sectionId === 'pulse') && activeSection === sectionId
       : sectionId === page;
+  }
+
+  function handleDexActionState(label: string | null) {
+    setActionLabel(label);
+    if (label === null) {
+      const nextTransactions = readUnresolvedSubmittedTransactions();
+      unresolvedSubmittedTransactionsRef.current = nextTransactions;
+      setUnresolvedSubmittedTransactions(nextTransactions);
+    }
   }
 
   return (
@@ -2306,7 +2371,7 @@ function App() {
                           <p>Identity owners claim the amount shown as Claimable now in the identity workspace.</p>
                         </div>
                       </div>
-                      <a className="workspace-button workspace-button--gold tokenomics-flow-panel__link" href={routeHref('/identity')}>
+                      <a className="workspace-button workspace-button--gold tokenomics-flow-panel__link" href={routeHref('/identity')} onClick={handleNavClick}>
                         Open identity workspace <ButtonArrow />
                       </a>
                     </div>
@@ -2363,6 +2428,8 @@ function App() {
               </div>
             </section>
           )}
+
+          {page === 'dex' && <DexPage wallet={wallet} onNotify={announce} onActionState={handleDexActionState} />}
 
           {page === 'staking' && (
            <section className="workspace-section workspace-section--staking" aria-labelledby="staking-workspace-title">
@@ -2851,7 +2918,7 @@ function App() {
 
       <footer className="site-footer">
         <div className="container site-footer__inner">
-          <a className="brand brand--footer" href={routeHref('/', '#overview')} aria-label="SERIES9 home">
+          <a className="brand brand--footer" href={routeHref('/', '#overview')} onClick={handleNavClick} aria-label="SERIES9 home">
             <span className="brand__mark">S9</span>
             <span className="brand__name">SERIES9</span>
           </a>

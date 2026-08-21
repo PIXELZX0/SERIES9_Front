@@ -54,6 +54,7 @@ export const SELECTOR = {
   monadRewardRatePerBlock: '0x26c08f7e',
   totalMonadStaked: '0x6780a855',
   pendingNFTRewards: '0x4ff9f5fa',
+  pendingStakingRewards: '0x6bd844cd',
   nftRewardPerToken: '0xd37df755',
   approve: '0x095ea7b3',
   stake: '0xa694fc3a',

@@ -3,6 +3,7 @@ import {
   CONTRACTS,
   MONAD,
   encodeApprove,
+  encodeCollectStakingRewards,
   encodeClaimNFTRewards,
   encodeClaimRewards,
   encodeClaimUnstaked,
@@ -27,9 +28,9 @@ import { useWallet } from './useWallet.ts';
 import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from './useProtocol.ts';
 
 type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'wallet';
-type SectionId = 'overview' | 'identity' | 'staking' | 'moderator' | 'pulse';
-type SiteRoute = '/' | '/identity' | '/staking' | '/moderator';
-type Page = 'home' | 'identity' | 'staking' | 'moderator';
+type SectionId = 'overview' | 'identity' | 'staking' | 'tokenomics' | 'moderator' | 'pulse';
+type SiteRoute = '/' | '/identity' | '/staking' | '/tokenomics' | '/moderator';
+type Page = 'home' | 'identity' | 'staking' | 'tokenomics' | 'moderator';
 type TokenKind = 'SER9' | 'MON';
 type StakingAsset = TokenKind;
 type ToastKind = 'success' | 'error';
@@ -84,6 +85,25 @@ function tokenAmount(value: bigint | null, decimals: number, precision = 2): str
 
 function compactAmount(value: bigint | null, decimals: number): string {
   return value === null ? PENDING : formatCompact(value, decimals);
+}
+
+function safeSubtract(left: bigint | null, right: bigint | null): bigint | null {
+  if (left === null || right === null) return null;
+  return left >= right ? left - right : 0n;
+}
+
+function percentageFromValues(part: bigint | null, total: bigint | null): string {
+  if (part === null || total === null || total === 0n) return PENDING;
+
+  const basisPoints = (part * 10_000n) / total;
+  const whole = basisPoints / 100n;
+  const fraction = (basisPoints % 100n).toString().padStart(2, '0');
+  return fraction === '00' ? `${whole.toLocaleString('en-US')}%` : `${whole.toLocaleString('en-US')}.${fraction}%`;
+}
+
+function progressFromValues(part: bigint | null, total: bigint | null): number | null {
+  if (part === null || total === null || total === 0n) return null;
+  return Math.min(100, Number((part * 10_000n) / total) / 100);
 }
 
 function gweiFromWei(value: bigint | null): string {
@@ -374,6 +394,7 @@ function currentPage(pathname = window.location.pathname): Page {
 
   if (normalizedPath === '/identity') return 'identity';
   if (normalizedPath === '/staking') return 'staking';
+  if (normalizedPath === '/tokenomics') return 'tokenomics';
   if (normalizedPath === '/moderator') return 'moderator';
   return 'home';
 }
@@ -382,6 +403,7 @@ const navLinks: Array<{ label: string; href: string; id: SectionId }> = [
   { label: 'Overview', href: routeHref('/', '#overview'), id: 'overview' },
   { label: 'Identity', href: routeHref('/identity'), id: 'identity' },
   { label: 'Staking', href: routeHref('/staking'), id: 'staking' },
+  { label: 'Tokenomics', href: routeHref('/tokenomics'), id: 'tokenomics' },
   { label: 'Moderator', href: routeHref('/moderator'), id: 'moderator' },
   { label: 'Pulse', href: routeHref('/', '#pulse'), id: 'pulse' },
 ];
@@ -706,6 +728,70 @@ function FeatureCard({ feature, ser9Image }: { feature: Feature; ser9Image: stri
   );
 }
 
+function IdentityRewardBreakdown({
+  pendingNFTRewards,
+  pendingStakingRewards,
+  decimals,
+  symbol,
+  ser9Image,
+  className = '',
+}: {
+  pendingNFTRewards: bigint | null;
+  pendingStakingRewards: bigint | null;
+  decimals: number;
+  symbol: string;
+  ser9Image: string | null;
+  className?: string;
+}) {
+  return (
+    <dl className={`identity-reward-breakdown${className ? ` ${className}` : ''}`}>
+      <div>
+        <dt>Claimable now</dt>
+        <dd className="token-value">
+          <span>{tokenAmount(pendingNFTRewards, decimals)} {symbol}</span>
+          <TokenLogo token="SER9" imageUri={ser9Image} />
+        </dd>
+      </div>
+      <div>
+        <dt>Awaiting distribution</dt>
+        <dd className="token-value">
+          <span>{tokenAmount(pendingStakingRewards, decimals)} {symbol}</span>
+          <TokenLogo token="SER9" imageUri={ser9Image} />
+        </dd>
+      </div>
+    </dl>
+  );
+}
+
+function TokenomicsMetric({
+  label,
+  value,
+  note,
+  token,
+  imageUri,
+}: {
+  label: string;
+  value: string;
+  note: string;
+  token?: TokenKind;
+  imageUri?: string | null;
+}) {
+  return (
+    <div className="tokenomics-metric">
+      <span className="tokenomics-metric__label">{label}</span>
+      {token ? (
+        <strong className="token-value">
+          <span>{value}</span>
+          <TokenLogo token={token} imageUri={token === 'SER9' ? imageUri : undefined} />
+        </strong>
+      ) : (
+        <strong>{value}</strong>
+      )}
+      <small>{note}</small>
+    </div>
+  );
+}
+
 function App() {
   const page = currentPage();
   const isHomePage = page === 'home';
@@ -750,7 +836,7 @@ function App() {
 
   const wallet = useWallet();
   const { address: walletAddress, onMonad: walletOnMonad, estimateTransactionFee } = wallet;
-  const stats = useProtocol();
+  const stats = useProtocol(accountRefreshVersion);
   const account = useAccount(wallet.address, stats.blockNumber, accountRefreshVersion);
 
   const connected = wallet.address !== null;
@@ -822,6 +908,29 @@ function App() {
   const unresolvedSubmittedTransaction = walletAddress === null
     ? null
     : unresolvedSubmittedTransactions[walletAddressKey(walletAddress)] ?? null;
+  const liquidSer9 = safeSubtract(stats.ser9TotalSupply, stats.totalStaked);
+  const stakingRatioLabel = percentageFromValues(stats.totalStaked, stats.ser9TotalSupply);
+  const stakingProgress = progressFromValues(stats.totalStaked, stats.ser9TotalSupply);
+  const hasClaimableNFTRewards = account.pendingNFTRewards !== null && account.pendingNFTRewards > 0n;
+  const hasAwaitingNFTRewards = stats.pendingStakingRewards !== null && stats.pendingStakingRewards > 0n;
+  const identityRewardsReadReady = accountReadReady &&
+    !stats.loading &&
+    stats.error === null &&
+    account.pendingNFTRewards !== null &&
+    stats.pendingStakingRewards !== null;
+  const identityRewardsAvailable = hasClaimableNFTRewards || hasAwaitingNFTRewards;
+  const identityRewardsActionDisabled = !identityRewardsReadReady ||
+    !identityRewardsAvailable ||
+    !walletOnMonad ||
+    wallet.connecting ||
+    wallet.switching ||
+    actionLabel !== null ||
+    unresolvedSubmittedTransaction !== null;
+  const identityRewardsButtonLabel = !identityRewardsReadReady
+    ? 'Reading rewards'
+    : hasAwaitingNFTRewards
+      ? 'Collect & claim'
+      : 'Claim rewards';
   const smartWalletAddress = smartWalletLive
     ? account.smartWallet
     : smartWalletPredictionAvailable
@@ -1321,19 +1430,46 @@ function App() {
   }
 
   async function handleClaimNFTRewards() {
-    if (!accountReadReady) {
-      announceError('Wait for a successful account read before claiming identity rewards.');
+    if (
+      !accountReadReady ||
+      stats.loading ||
+      stats.error !== null ||
+      account.pendingNFTRewards === null ||
+      stats.pendingStakingRewards === null
+    ) {
+      announceError('Wait for successful account and protocol reward reads before claiming identity rewards.');
       return;
     }
-    if (account.pendingNFTRewards === null || account.pendingNFTRewards === 0n) {
-      announceError('No NFT rewards are currently claimable.');
+    if (account.pendingNFTRewards === 0n && stats.pendingStakingRewards === 0n) {
+      announceError('No identity rewards are claimable or awaiting distribution.');
       return;
     }
-    if (!(await requireMonadWallet())) return;
-    await sendAndWait('Claim identity rewards', {
-      to: CONTRACTS.identity,
-      data: encodeClaimNFTRewards(),
-    });
+    if (writeInFlightRef.current) {
+      announceError('Another wallet action is already in progress.');
+      return;
+    }
+
+    writeInFlightRef.current = true;
+    setActionLabel('Preparing identity rewards');
+    try {
+      if (!(await requireMonadWallet())) return;
+
+      if (stats.pendingStakingRewards > 0n) {
+        const collected = await sendAndWait('Collect staking rewards', {
+          to: CONTRACTS.identity,
+          data: encodeCollectStakingRewards(),
+        }, true);
+        if (!collected) return;
+      }
+
+      await sendAndWait('Claim identity rewards', {
+        to: CONTRACTS.identity,
+        data: encodeClaimNFTRewards(),
+      }, true);
+    } finally {
+      writeInFlightRef.current = false;
+      setActionLabel(null);
+    }
   }
 
   async function handleModeratorVerification(event: FormEvent<HTMLFormElement>) {
@@ -1898,17 +2034,27 @@ function App() {
                       <div><dt>REPUTATION</dt><dd>{account.reputation === null ? PENDING : account.reputation.toLocaleString('en-US')}</dd></div>
                       <div><dt>TOKEN ID</dt><dd>#{account.tokenId.toString()}</dd></div>
                     </dl>
-                      <div className="identity-summary__footer">
-                       <span>NFT rewards <strong className="token-value"><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol}</span><TokenLogo token="SER9" imageUri={stats.ser9Image} /></strong></span>
-                      <button
-                        className="workspace-button workspace-button--small"
-                        type="button"
-                          disabled={!accountReadReady || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n}
-                        onClick={() => void handleClaimNFTRewards()}
-                      >
-                        Claim rewards <ButtonArrow />
-                      </button>
-                    </div>
+                       <div className="identity-summary__footer">
+                         <div className="identity-summary__rewards">
+                           <span className="panel-kicker">IDENTITY REWARDS</span>
+                           <IdentityRewardBreakdown
+                             pendingNFTRewards={account.pendingNFTRewards}
+                             pendingStakingRewards={stats.pendingStakingRewards}
+                             decimals={stats.ser9Decimals}
+                             symbol={symbol}
+                             ser9Image={stats.ser9Image}
+                             className="identity-reward-breakdown--summary"
+                           />
+                         </div>
+                         <button
+                           className="workspace-button workspace-button--small"
+                           type="button"
+                           disabled={identityRewardsActionDisabled}
+                           onClick={() => void handleClaimNFTRewards()}
+                         >
+                           {actionLabel ?? identityRewardsButtonLabel} <ButtonArrow />
+                         </button>
+                       </div>
                     <a className="workspace-contract-link" href={explorerAddressUrl(CONTRACTS.identity)} target="_blank" rel="noreferrer">
                       View identity contract <ButtonArrow />
                     </a>
@@ -1997,10 +2143,24 @@ function App() {
                        </label>
                           <button className="workspace-button workspace-button--ink" type="submit" disabled={!accountReadReady || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null}>Set handle <ButtonArrow /></button>
                      </form>
-                      <div className="workspace-action-row workspace-action-row--muted">
-                        <div><span className="panel-kicker">REPUTATION REWARDS</span><strong>Claim NFT rewards</strong><p className="token-copy"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>{tokenAmount(account.pendingNFTRewards, stats.ser9Decimals)} {symbol} currently attributable to this identity.</span></p></div>
-                        <button className="workspace-button workspace-button--outline" type="button" disabled={!accountReadReady || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || account.pendingNFTRewards === null || account.pendingNFTRewards === 0n} onClick={() => void handleClaimNFTRewards()}>Claim <ButtonArrow /></button>
-                     </div>
+                       <div className="workspace-action-row workspace-action-row--muted">
+                         <div className="identity-reward-action">
+                           <span className="panel-kicker">REPUTATION REWARDS</span>
+                           <strong>Collect and claim NFT rewards</strong>
+                           <IdentityRewardBreakdown
+                             pendingNFTRewards={account.pendingNFTRewards}
+                             pendingStakingRewards={stats.pendingStakingRewards}
+                             decimals={stats.ser9Decimals}
+                             symbol={symbol}
+                             ser9Image={stats.ser9Image}
+                             className="identity-reward-breakdown--action"
+                           />
+                           <p>Awaiting distribution is collected before the identity claim.</p>
+                         </div>
+                         <button className="workspace-button workspace-button--outline" type="button" disabled={identityRewardsActionDisabled} onClick={() => void handleClaimNFTRewards()}>
+                           {actionLabel ?? identityRewardsButtonLabel} <ButtonArrow />
+                         </button>
+                      </div>
                    </>
                  )}
                </article>
@@ -2069,7 +2229,142 @@ function App() {
           </section>
         )}
 
-         {page === 'staking' && (
+          {page === 'tokenomics' && (
+            <section className="workspace-section workspace-section--tokenomics" aria-labelledby="tokenomics-workspace-title">
+              <div className="container">
+                <div className="workspace-heading">
+                  <div>
+                    <p className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />TOKENOMICS</p>
+                    <h2 id="tokenomics-workspace-title">Follow the value<br /><em>through the loop.</em></h2>
+                  </div>
+                  <p>Live protocol readings for supply, staking, identity economics, and the reward path that turns shared activity into a claim.</p>
+                </div>
+
+                {stats.error && (
+                  <div className="workspace-banner" role="status">
+                    <span><strong>Protocol refresh unavailable.</strong> Values shown are the last successful readings; fresh data is unavailable. {stats.error}</span>
+                  </div>
+                )}
+
+                <div className="tokenomics-grid">
+                  <article className="workspace-panel tokenomics-supply-panel">
+                    <div className="workspace-panel__header">
+                      <div><span className="panel-kicker">SER9 SUPPLY MAP</span><strong>Where the token sits</strong></div>
+                      <TokenLogo token="SER9" imageUri={stats.ser9Image} size="medium" standalone />
+                    </div>
+                    <div className="tokenomics-supply-panel__body">
+                      <div className="tokenomics-primary-stat">
+                        <span className="tokenomics-metric__label">TOTAL SER9 SUPPLY</span>
+                        <strong className="token-value">
+                          <span>{tokenAmount(stats.ser9TotalSupply, stats.ser9Decimals)} {symbol}</span>
+                          <TokenLogo token="SER9" imageUri={stats.ser9Image} size="medium" />
+                        </strong>
+                      </div>
+                      <div className="tokenomics-progress-block">
+                        <div className="tokenomics-progress-block__header">
+                          <span>STAKING RATIO</span>
+                          <strong>{stakingRatioLabel}</strong>
+                        </div>
+                        <div
+                          className="tokenomics-progress"
+                          role="progressbar"
+                          aria-label="SER9 staking ratio"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={stakingProgress ?? undefined}
+                        >
+                          <span style={stakingProgress === null ? undefined : { width: `${stakingProgress}%` }} />
+                        </div>
+                        <div className="tokenomics-progress-block__legend">
+                          <span className="token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>STAKED {tokenAmount(stats.totalStaked, stats.ser9Decimals)} {symbol}</span></span>
+                          <span className="token-label"><TokenLogo token="SER9" imageUri={stats.ser9Image} /><span>LIQUID {tokenAmount(liquidSer9, stats.ser9Decimals)} {symbol}</span></span>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article className="workspace-panel tokenomics-flow-panel">
+                    <div className="workspace-panel__header">
+                      <div><span className="panel-kicker">REWARD FLOW</span><strong>Collect. Distribute. Claim.</strong></div>
+                      <Icon name="orbit" size={19} />
+                    </div>
+                    <div className="tokenomics-flow-panel__body">
+                      <div className="tokenomics-flow">
+                        <div className="tokenomics-flow__step">
+                          <span>01 / COLLECT</span>
+                          <strong>Pull from staking</strong>
+                          <p>A permissionless `collectStakingRewards()` call moves pending SER9 into the identity reward path.</p>
+                        </div>
+                        <div className="tokenomics-flow__step">
+                          <span>02 / DISTRIBUTE</span>
+                          <strong>Make rewards attributable</strong>
+                          <p>The identity contract accounts for the collected SER9 before an identity can claim it.</p>
+                        </div>
+                        <div className="tokenomics-flow__step">
+                          <span>03 / CLAIM</span>
+                          <strong>Claim your identity share</strong>
+                          <p>Identity owners claim the amount shown as Claimable now in the identity workspace.</p>
+                        </div>
+                      </div>
+                      <a className="workspace-button workspace-button--gold tokenomics-flow-panel__link" href={routeHref('/identity')}>
+                        Open identity workspace <ButtonArrow />
+                      </a>
+                    </div>
+                  </article>
+                </div>
+
+                <div className="tokenomics-metrics" aria-label="Live tokenomics readings">
+                  <TokenomicsMetric
+                    label="TOTAL IDENTITIES"
+                    value={stats.identityCount === null ? PENDING : stats.identityCount.toLocaleString('en-US')}
+                    note="minted identity tokens"
+                  />
+                  <TokenomicsMetric
+                    label="WALLETS DEPLOYED"
+                    value={stats.walletCount === null ? PENDING : stats.walletCount.toLocaleString('en-US')}
+                    note="identity smart wallets"
+                  />
+                  <TokenomicsMetric
+                    label="HUMAN MINT FEE"
+                    value={tokenAmount(stats.humanMintFee, stats.ser9Decimals)}
+                    note={`${symbol} per identity mint`}
+                    token="SER9"
+                    imageUri={stats.ser9Image}
+                  />
+                  <TokenomicsMetric
+                    label="AI MINT FEE"
+                    value={tokenAmount(stats.aiMintFee, stats.ser9Decimals)}
+                    note={`${symbol} per identity mint`}
+                    token="SER9"
+                    imageUri={stats.ser9Image}
+                  />
+                  <TokenomicsMetric
+                    label="SER9 REWARD RATE / BLOCK"
+                    value={tokenAmount(stats.rewardRatePerBlock, stats.ser9Decimals, 4)}
+                    note="staking emission"
+                    token="SER9"
+                    imageUri={stats.ser9Image}
+                  />
+                  <TokenomicsMetric
+                    label="MON STAKING REWARD RATE / BLOCK"
+                    value={tokenAmount(stats.monadRewardRatePerBlock, stats.ser9Decimals, 4)}
+                    note="SER9 emission for MON staking"
+                    token="SER9"
+                    imageUri={stats.ser9Image}
+                  />
+                  <TokenomicsMetric
+                    label="NFT REWARDS AWAITING DISTRIBUTION"
+                    value={tokenAmount(stats.pendingStakingRewards, stats.ser9Decimals)}
+                    note="SER9 still in the staking contract"
+                    token="SER9"
+                    imageUri={stats.ser9Image}
+                  />
+                </div>
+              </div>
+            </section>
+          )}
+
+          {page === 'staking' && (
            <section className="workspace-section workspace-section--staking" aria-labelledby="staking-workspace-title">
           <div className="container">
             <div className="workspace-heading">

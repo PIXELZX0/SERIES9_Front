@@ -42,6 +42,7 @@ export type ProtocolStats = {
   totalReputationScore: bigint | null;
   humanMintFee: bigint | null;
   aiMintFee: bigint | null;
+  pendingStakingRewards: bigint | null;
   identityCount: number | null;
   walletCount: number | null;
   /** Gas used per sampled block, oldest first. */
@@ -280,7 +281,7 @@ function extractIdentityImage(tokenUri: string | null): string | null {
   return null;
 }
 
-export function useProtocol(): ProtocolStats {
+export function useProtocol(refreshVersion = 0): ProtocolStats {
   const [stats, setStats] = useState<ProtocolStats>({
     loading: true,
     error: null,
@@ -300,6 +301,7 @@ export function useProtocol(): ProtocolStats {
     totalReputationScore: null,
     humanMintFee: null,
     aiMintFee: null,
+    pendingStakingRewards: null,
     identityCount: null,
     walletCount: null,
     gasSeries: [],
@@ -307,10 +309,14 @@ export function useProtocol(): ProtocolStats {
 
   // Supply rarely moves; probe it once per mount rather than every poll.
   const supplyProbed = useRef(false);
+  const completedRefreshVersion = useRef<number | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     let timeoutId = 0;
+
+    // Keep writes disabled before a forced refresh begins its RPC read.
+    setStats((previous) => ({ ...previous, loading: true }));
 
     async function refresh() {
       try {
@@ -332,6 +338,7 @@ export function useProtocol(): ProtocolStats {
             ethCall(CONTRACTS.identity, SELECTOR.totalReputationScore),
             ethCall(CONTRACTS.identity, SELECTOR.humanMintFee),
             ethCall(CONTRACTS.identity, SELECTOR.aiMintFee),
+            ethCall(CONTRACTS.identity, SELECTOR.pendingStakingRewards),
           ],
           controller.signal,
         );
@@ -360,8 +367,10 @@ export function useProtocol(): ProtocolStats {
           totalReputationScore: decodeUint(results[13]),
           humanMintFee: decodeUint(results[14]),
           aiMintFee: decodeUint(results[15]),
+          pendingStakingRewards: decodeUint(results[16]),
           gasSeries,
         }));
+        completedRefreshVersion.current = refreshVersion;
 
         if (!supplyProbed.current) {
           supplyProbed.current = true;
@@ -372,6 +381,7 @@ export function useProtocol(): ProtocolStats {
         }
       } catch (refreshError) {
         if (controller.signal.aborted) return;
+        completedRefreshVersion.current = refreshVersion;
         setStats((previous) => ({
           ...previous,
           loading: false,
@@ -390,9 +400,9 @@ export function useProtocol(): ProtocolStats {
       controller.abort();
       window.clearTimeout(timeoutId);
     };
-  }, []);
+  }, [refreshVersion]);
 
-  return stats;
+  return completedRefreshVersion.current === refreshVersion ? stats : { ...stats, loading: true };
 }
 
 function decodeUnstakeRequest(result: unknown): UnstakeRequest | null {

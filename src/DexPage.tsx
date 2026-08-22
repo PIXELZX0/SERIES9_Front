@@ -24,7 +24,7 @@ import {
   simulateDexWrite,
 } from './dex.ts';
 import { computePairId } from './keccak.ts';
-import { explorerAddressUrl, formatUnits, shortenAddress } from './chain.ts';
+import { CONTRACTS, explorerAddressUrl, formatUnits, shortenAddress } from './chain.ts';
 import { useDex, type DexOpenOrder, type DexPoolSnapshot, type DexToken } from './useDex.ts';
 import { dexHref, useDexSection, type DexTab } from './useDexRoute.ts';
 import type { WalletState } from './useWallet.ts';
@@ -84,6 +84,11 @@ const FEE_PRESETS: Array<{ ppm: string; label: string; note: string }> = [
   { ppm: '500', label: '0.05%', note: 'stable pairs' },
   { ppm: '3000', label: '0.30%', note: 'standard' },
   { ppm: '10000', label: '1.00%', note: 'volatile' },
+];
+
+/** Curated tokens offered in the create-tab address dropdown (pool tokens are appended at runtime). */
+const CREATE_TOKEN_CATALOG: DexToken[] = [
+  { address: CONTRACTS.ser9, symbol: 'SER9', decimals: 18 },
 ];
 
 const REMOVE_PERCENTS = [25, 50, 75, 100] as const;
@@ -680,6 +685,77 @@ function TokenSelectDialog({ side, tokens, balances, selectedIn, selectedOut, on
   );
 }
 
+type CreateAddressFieldProps = {
+  value: string;
+  tokens: DexToken[];
+  excludeAddress: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onChange: (value: string) => void;
+};
+
+function CreateAddressField({ value, tokens, excludeAddress, open, onOpenChange, onChange }: CreateAddressFieldProps) {
+  const normalized = value.trim().toLowerCase();
+  const excluded = excludeAddress?.toLowerCase() ?? '';
+  const visible = tokens.filter((token) =>
+    token.address.toLowerCase() !== excluded &&
+    (!normalized ||
+      token.symbol?.toLowerCase().includes(normalized) ||
+      token.address.toLowerCase().includes(normalized)));
+
+  return (
+    <div
+      className="dx-pickfield"
+      onBlur={(event) => {
+        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+          onOpenChange(false);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') onOpenChange(false);
+      }}
+    >
+      <div className="dx-field__row">
+        <input
+          value={value}
+          onChange={(event) => { onChange(event.target.value); if (!open) onOpenChange(true); }}
+          onFocus={() => { if (!open) onOpenChange(true); }}
+          placeholder="0x…"
+          spellCheck="false"
+          autoComplete="off"
+        />
+        <span className={`dx-pickfield__chevron${open ? ' dx-pickfield__chevron--open' : ''}`} aria-hidden="true">
+          <ChevronDownIcon size={13} />
+        </span>
+      </div>
+      {open && (
+        <div className="dx-pickmenu" role="listbox" aria-label="Token list">
+          {visible.map((token) => (
+            <button
+              key={token.address}
+              type="button"
+              role="option"
+              aria-selected={value.toLowerCase() === token.address.toLowerCase()}
+              className="dx-pickmenu__option"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => { onChange(token.address); onOpenChange(false); }}
+            >
+              <TokenBadge token={token} />
+              <strong>{tokenSymbol(token)}</strong>
+              <code>{shortenAddress(token.address)}</code>
+            </button>
+          ))}
+          <p className="dx-pickmenu__hint">
+            {visible.length === 0
+              ? 'No match — paste any deployed ERC20 address.'
+              : 'Or paste any deployed ERC20 address.'}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type PoolFinderDialogProps = {
   addressInput: string;
   onAddressInput: (value: string) => void;
@@ -836,6 +912,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tokenSelect, setTokenSelect] = useState<TokenSelectSide | null>(null);
   const [rateInverted, setRateInverted] = useState(false);
+  const [createPicker, setCreatePicker] = useState<'a' | 'b' | null>(null);
 
   const writeInFlightRef = useRef(false);
   const writeLockWalletRef = useRef<string | null>(null);
@@ -980,6 +1057,17 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const orderExpiryAt = nowSeconds > 0 && expirySeconds !== null ? BigInt(nowSeconds) + expirySeconds : null;
   const openOrders = dex.myOrders.filter((entry) => ['OPEN', 'PARTIAL'].includes(orderStatusLabel(entry, nowSeconds)));
   const closedOrders = dex.myOrders.filter((entry) => !openOrders.includes(entry));
+
+  const createTokenCatalog = useMemo(() => {
+    const byKey = new Map<string, DexToken>();
+    const add = (token: DexToken | null) => {
+      if (token) byKey.set(token.address.toLowerCase(), token);
+    };
+    add(pool?.token0 ?? null);
+    add(pool?.token1 ?? null);
+    CREATE_TOKEN_CATALOG.forEach(add);
+    return [...byKey.values()];
+  }, [pool?.token0, pool?.token1]);
 
   const createTokenAAddress = normalizeDexAddress(createTokenA);
   const createTokenBAddress = normalizeDexAddress(createTokenB);
@@ -2229,28 +2317,26 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
                 <label className="dx-field dx-field--address">
                   <span className="dx-field__top"><b>Token A</b><i>ERC20 on Monad</i></span>
-                  <div className="dx-field__row">
-                    <input
-                      value={createTokenA}
-                      onChange={(event) => { setCreateTokenA(event.target.value); setActionError(null); }}
-                      placeholder="0x…"
-                      spellCheck="false"
-                      autoComplete="off"
-                    />
-                  </div>
+                  <CreateAddressField
+                    value={createTokenA}
+                    tokens={createTokenCatalog}
+                    excludeAddress={createTokenBAddress}
+                    open={createPicker === 'a'}
+                    onOpenChange={(next) => setCreatePicker(next ? 'a' : null)}
+                    onChange={(value) => { setCreateTokenA(value); setActionError(null); }}
+                  />
                   <small>{createTokenA && createTokenAAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
                 </label>
                 <label className="dx-field dx-field--address">
                   <span className="dx-field__top"><b>Token B</b><i>must differ from A</i></span>
-                  <div className="dx-field__row">
-                    <input
-                      value={createTokenB}
-                      onChange={(event) => { setCreateTokenB(event.target.value); setActionError(null); }}
-                      placeholder="0x…"
-                      spellCheck="false"
-                      autoComplete="off"
-                    />
-                  </div>
+                  <CreateAddressField
+                    value={createTokenB}
+                    tokens={createTokenCatalog}
+                    excludeAddress={createTokenAAddress}
+                    open={createPicker === 'b'}
+                    onOpenChange={(next) => setCreatePicker(next ? 'b' : null)}
+                    onChange={(value) => { setCreateTokenB(value); setActionError(null); }}
+                  />
                   <small>{createTokenB && createTokenBAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
                 </label>
 

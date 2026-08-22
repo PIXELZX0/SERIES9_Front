@@ -26,8 +26,12 @@ import {
   dexCall,
   readSpotPoolsForPair,
   simulateDexWrite,
+  monWrapShortfall,
+  spendableBalance,
+  wrappableMon,
 } from './dex.ts';
 import { computePairId, keccak256Hex, sortTokenPair } from './keccak.ts';
+import { MON_NATIVE_GAS_RESERVE, TOKENS } from './chain.ts';
 import { CONTRACTS, rpcBatch } from './chain.ts';
 
 const SER9 = CONTRACTS.ser9;
@@ -159,6 +163,40 @@ assert.ok(nextOrderId !== null && nextOrderId >= 1n, 'order ids start at one');
 assert.deepEqual(await readOrderWindow(1n, 10), [], 'an empty book has no order slots to read');
 const orderWindow = await readOrderWindow(nextOrderId, 10);
 assert.ok(orderWindow.length <= 10);
+
+// Auto-wrap arithmetic: MON above the gas reserve backs a WMON spend 1:1.
+const WMON = { address: TOKENS.wmon.toUpperCase() }; // checksum casing must not matter
+const SER9_TOKEN = { address: SER9 };
+const ONE = 10n ** 18n;
+const RESERVE = MON_NATIVE_GAS_RESERVE;
+
+assert.equal(wrappableMon(WMON, RESERVE + ONE), ONE, 'MON above the reserve is wrappable');
+assert.equal(wrappableMon(WMON, RESERVE), 0n, 'the reserve itself is never wrapped');
+assert.equal(wrappableMon(WMON, null), 0n, 'an unread MON balance wraps nothing');
+assert.equal(wrappableMon(SER9_TOKEN, RESERVE + ONE), 0n, 'only WMON is backed by native MON');
+assert.equal(wrappableMon(null, RESERVE + ONE), 0n, 'an unknown token is backed by nothing');
+
+assert.equal(spendableBalance(WMON, 2n * ONE, RESERVE + ONE), 3n * ONE, 'MAX spans WMON plus wrappable MON');
+assert.equal(spendableBalance(SER9_TOKEN, 2n * ONE, RESERVE + ONE), 2n * ONE, 'a non-WMON MAX is the ERC20 balance');
+assert.equal(spendableBalance(WMON, null, RESERVE + ONE), null, 'an unread balance has no MAX');
+
+assert.equal(monWrapShortfall(WMON, 3n * ONE, 2n * ONE, RESERVE + ONE), null, 'a covered spend wraps nothing');
+assert.equal(monWrapShortfall(WMON, 2n * ONE, 2n * ONE, RESERVE + ONE), null, 'an exactly covered spend wraps nothing');
+assert.equal(monWrapShortfall(WMON, 2n * ONE, 3n * ONE, RESERVE + ONE), ONE, 'the shortfall is wrapped, not the whole spend');
+// MAX fills the amount with the full spendable balance, which must stay wrappable.
+assert.equal(monWrapShortfall(WMON, 2n * ONE, spendableBalance(WMON, 2n * ONE, RESERVE + ONE), RESERVE + ONE), ONE, 'MAX stays coverable');
+assert.equal(monWrapShortfall(WMON, 2n * ONE, 4n * ONE, RESERVE + ONE), null, 'a gap wider than the wrappable MON is refused');
+assert.equal(monWrapShortfall(WMON, 2n * ONE, 3n * ONE, RESERVE), null, 'spending the gas reserve is refused');
+assert.equal(monWrapShortfall(SER9_TOKEN, 2n * ONE, 3n * ONE, RESERVE + ONE), null, 'a non-WMON shortfall is never wrapped');
+
+// Auto-wrap calls `deposit()` on WMON with the MON shortfall as msg.value.
+const depositSignature = `0x${Buffer.from('deposit()', 'utf8').toString('hex')}`;
+assert.equal(
+  keccak256Hex(depositSignature).slice(0, 10),
+  DEX_SELECTOR.deposit,
+  'the WMON wrap selector must be keccak256("deposit()")',
+);
+assert.equal(encodeDexNoArgs(DEX_SELECTOR.deposit), DEX_SELECTOR.deposit, 'deposit() takes no arguments');
 
 // SER9/IDENTITY has no pool, so it has no book, and the order must be refused.
 const noBook = await simulateDexWrite(

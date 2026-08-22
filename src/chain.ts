@@ -38,6 +38,9 @@ export const TOKENS = {
   usdc: env.VITE_USDC_ADDRESS ?? '0x754704Bc059F8C67012fEd69BC8A327a5aafb603',
 } as const;
 
+/** Native MON held back from any "spend it all" flow so gas still clears. */
+export const MON_NATIVE_GAS_RESERVE = 250_000_000_000_000_000n; // 0.25 MON
+
 export const SELECTOR = {
   totalStaked: '0x817b1cd2',
   balanceOf: '0x70a08231',

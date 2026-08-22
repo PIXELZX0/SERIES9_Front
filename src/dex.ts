@@ -1,6 +1,8 @@
 import {
   CONTRACTS,
   MONAD,
+  MON_NATIVE_GAS_RESERVE,
+  TOKENS,
   encodeAddress,
   encodeCall,
   encodeUint,
@@ -63,6 +65,8 @@ export const DEX_SELECTOR = {
   decimals: '0x313ce567',
   symbol: '0x95d89b41',
   swapExactIn: '0xa6220b66',
+  /** WMON is a WETH9 clone: `deposit()` is payable and mints 1:1. */
+  deposit: '0xd0e30db0',
   positionManagerName: '0x06fdde03',
   positionManagerSymbol: '0x95d89b41',
   nextTokenId: '0x75794a3c',
@@ -115,6 +119,40 @@ export const DEX_ERROR_MESSAGE: Record<string, string> = {
 export function describeDexRevert(data: unknown): string | null {
   if (typeof data !== 'string' || !/^0x[0-9a-fA-F]{8}/.test(data)) return null;
   return DEX_ERROR_MESSAGE[data.slice(0, 10).toLowerCase()] ?? null;
+}
+
+/**
+ * Native MON that can back a WMON spend. WMON is a WETH9 clone, so wrapping is
+ * 1:1 — every MON above the gas reserve is usable, and the reserve is what
+ * keeps the wrap itself (and the action it funds) able to pay for gas.
+ */
+export function wrappableMon(token: { address: string } | null, native: bigint | null): bigint {
+  if (token === null || native === null || token.address.toLowerCase() !== TOKENS.wmon.toLowerCase()) return 0n;
+  return native > MON_NATIVE_GAS_RESERVE ? native - MON_NATIVE_GAS_RESERVE : 0n;
+}
+
+/** Token balance a spend can draw on, wrappable MON included. */
+export function spendableBalance(
+  token: { address: string } | null,
+  balance: bigint | null | undefined,
+  native: bigint | null,
+): bigint | null {
+  return balance == null ? null : balance + wrappableMon(token, native);
+}
+
+/**
+ * MON to wrap before a spend clears, or `null` when the ERC20 balance already
+ * covers it — or when wrapping cannot close the gap either.
+ */
+export function monWrapShortfall(
+  token: { address: string } | null,
+  balance: bigint | null | undefined,
+  amount: bigint | null,
+  native: bigint | null,
+): bigint | null {
+  if (amount === null || balance == null || amount <= balance) return null;
+  const shortfall = amount - balance;
+  return shortfall <= wrappableMon(token, native) ? shortfall : null;
 }
 
 export function dexCall(to: string, data: string): RpcCall {

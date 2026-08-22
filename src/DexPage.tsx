@@ -12,16 +12,21 @@ import {
   DEX_CONTRACTS,
   DEX_ORDER_SIDE,
   DEX_ORDER_STATUS,
+  DEX_SELECTOR,
   encodeAddLiquidity,
   encodeCancelOrder,
   encodeCreateSpotPool,
+  encodeDexNoArgs,
   encodeErc20Approve,
   encodePlaceOrder,
   encodeRemoveLiquidity,
   encodeSwapExactIn,
+  monWrapShortfall,
   normalizeDexAddress,
   readSpotPoolsForPair,
   simulateDexWrite,
+  spendableBalance,
+  wrappableMon,
 } from './dex.ts';
 import { computePairId } from './keccak.ts';
 import {
@@ -130,6 +135,13 @@ function walletAddressKey(address: string): string {
 
 function sameTransactionHash(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+/** `Balance 12.5 WMON + 3.1 MON` when MON can top the spend up. */
+function balanceHint(token: DexToken | null, balance: bigint | null | undefined, native: bigint | null): string {
+  const wrappable = wrappableMon(token, native);
+  const held = `Balance ${formatTokenValue(balance ?? null, token)}`;
+  return wrappable > 0n ? `${held} + ${formatUnits(wrappable, 18, 4)} MON` : held;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1028,11 +1040,15 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     : tokenIn;
   const onchainAllowance = walletToken?.allowance ?? null;
   const approvalRequired = inputAmount !== null && (onchainAllowance === null || inputAmount > onchainAllowance);
+  // A short WMON balance is not a dead end: MON wraps into it 1:1, so every
+  // spend path treats wrappable MON as part of the balance.
+  const nativeBalance = dex.walletTokens?.native ?? null;
+  const swapWrap = monWrapShortfall(tokenIn, walletToken?.balance, inputAmount, nativeBalance);
   const insufficientBalance = wallet.address !== null &&
-    walletToken?.balance !== null &&
-    walletToken !== null &&
+    walletToken?.balance != null &&
     inputAmount !== null &&
-    inputAmount > walletToken.balance;
+    inputAmount > walletToken.balance &&
+    swapWrap === null;
   const walletReadReady = wallet.address === null || (
     walletToken !== null &&
     walletToken.balance !== null &&
@@ -1063,8 +1079,10 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const poolRatioReady = pool?.reserves != null && pool.reserves.reserve0 > 0n && pool.reserves.reserve1 > 0n;
   const approvalRequired0 = amount0In !== null && (walletToken0?.allowance == null || amount0In > walletToken0.allowance);
   const approvalRequired1 = amount1In !== null && (walletToken1?.allowance == null || amount1In > walletToken1.allowance);
-  const insufficient0 = amount0In !== null && walletToken0?.balance != null && amount0In > walletToken0.balance;
-  const insufficient1 = amount1In !== null && walletToken1?.balance != null && amount1In > walletToken1.balance;
+  const wrap0 = monWrapShortfall(pool?.token0 ?? null, walletToken0?.balance, amount0In, nativeBalance);
+  const wrap1 = monWrapShortfall(pool?.token1 ?? null, walletToken1?.balance, amount1In, nativeBalance);
+  const insufficient0 = amount0In !== null && walletToken0?.balance != null && amount0In > walletToken0.balance && wrap0 === null;
+  const insufficient1 = amount1In !== null && walletToken1?.balance != null && amount1In > walletToken1.balance && wrap1 === null;
   const addLiquidityReady = poolVerified &&
     amount0In !== null &&
     amount1In !== null &&
@@ -1102,9 +1120,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const escrowWalletToken = orderSide === 'buy' ? walletToken1 : walletToken0;
   const escrowApprovalRequired = orderEscrowAmount !== null &&
     (escrowWalletToken?.orderbookAllowance == null || orderEscrowAmount > escrowWalletToken.orderbookAllowance);
+  const escrowWrap = monWrapShortfall(escrowToken, escrowWalletToken?.balance, orderEscrowAmount, nativeBalance);
   const escrowShort = orderEscrowAmount !== null &&
     escrowWalletToken?.balance != null &&
-    orderEscrowAmount > escrowWalletToken.balance;
+    orderEscrowAmount > escrowWalletToken.balance &&
+    escrowWrap === null;
   const bookInitialized = dex.orderbook?.bookConfig?.initialized === true;
   const orderReady = poolVerified &&
     bookInitialized &&
@@ -1335,7 +1355,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
   async function sendDexTransaction(
     label: string,
-    request: { to: string; data: string },
+    request: { to: string; data: string; value?: bigint },
     existingOperation?: DexOperation,
   ): Promise<boolean> {
     if (unresolvedTransaction !== null) {
@@ -1483,6 +1503,22 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     return sendDexTransaction(label, request, operation);
   }
 
+  /**
+   * Top a WMON balance up from native MON. Sent as its own transaction and its
+   * own step, like an approval: the wallet has to sign it before the action it
+   * funds can be signed.
+   */
+  async function wrapMon(token: DexToken, shortfall: bigint): Promise<void> {
+    const wrapped = await sendDexTransaction('Wrap MON', {
+      to: token.address,
+      data: encodeDexNoArgs(DEX_SELECTOR.deposit),
+      value: shortfall,
+    });
+    if (wrapped) {
+      onNotify(`Wrapped ${formatUnits(shortfall, 18, 4)} MON into ${tokenSymbol(token)}. Run the action again to continue.`);
+    }
+  }
+
   async function handleSwap(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canStartWrite()) return;
@@ -1501,6 +1537,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     if (!(await ensureMonadWallet())) return;
     const recipient = wallet.address;
     if (!recipient) return;
+
+    if (swapWrap !== null) {
+      await wrapMon(tokenIn, swapWrap);
+      return;
+    }
 
     if (approvalRequired) {
       const approved = await sendDexTransaction(`Approve ${tokenSymbol(tokenIn)}`, {
@@ -1570,6 +1611,15 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     if (!(await ensureMonadWallet())) return;
     const recipient = wallet.address;
     if (!recipient) return;
+
+    if (wrap0 !== null) {
+      await wrapMon(pool.token0, wrap0);
+      return;
+    }
+    if (wrap1 !== null) {
+      await wrapMon(pool.token1, wrap1);
+      return;
+    }
 
     if (approvalRequired0) {
       const approved = await sendDexTransaction(`Approve ${tokenSymbol(pool.token0)}`, {
@@ -1653,6 +1703,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       return;
     }
     if (!(await ensureMonadWallet())) return;
+
+    if (escrowWrap !== null) {
+      await wrapMon(escrowToken, escrowWrap);
+      return;
+    }
 
     if (escrowApprovalRequired) {
       const approved = await sendDexTransaction(`Approve ${tokenSymbol(escrowToken)} for the Orderbook`, {
@@ -1784,9 +1839,9 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   }
 
   function handleMaxAmount() {
-    if (walletToken?.balance !== null && walletToken !== null && tokenIn?.decimals !== null && tokenIn !== null) {
-      setAmountIn(formatUnits(walletToken.balance, tokenIn.decimals, tokenIn.decimals));
-    }
+    const spendable = spendableBalance(tokenIn, walletToken?.balance, nativeBalance);
+    if (spendable === null || tokenIn === null || tokenIn.decimals === null) return;
+    setAmountIn(formatUnits(spendable, tokenIn.decimals, tokenIn.decimals));
   }
 
   function handleMatchRatio(side: 'token0' | 'token1') {
@@ -1805,8 +1860,9 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   function handleMaxDeposit(side: 'token0' | 'token1') {
     const target = side === 'token0' ? walletToken0 : walletToken1;
     const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
-    if (target?.balance == null || token?.decimals == null) return;
-    const formatted = formatUnits(target.balance, token.decimals, token.decimals);
+    const spendable = spendableBalance(token, target?.balance, nativeBalance);
+    if (spendable === null || token?.decimals == null) return;
+    const formatted = formatUnits(spendable, token.decimals, token.decimals);
     if (side === 'token0') setAddAmount0(formatted);
     else setAddAmount1(formatted);
   }
@@ -1823,35 +1879,41 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           ? 'Enter an amount'
           : insufficientBalance
             ? `Insufficient ${tokenSymbol(tokenIn)} balance`
-            : approvalRequired
-              ? `Approve ${tokenSymbol(tokenIn)}`
-              : currentQuoteLoading && currentQuote === null
-                ? 'Fetching quote'
-                : `Swap ${tokenSymbol(tokenIn)} for ${tokenSymbol(tokenOut)}`
+            : swapWrap !== null
+              ? 'Wrap MON'
+              : approvalRequired
+                ? `Approve ${tokenSymbol(tokenIn)}`
+                : currentQuoteLoading && currentQuote === null
+                  ? 'Fetching quote'
+                  : `Swap ${tokenSymbol(tokenIn)} for ${tokenSymbol(tokenOut)}`
   );
   const addLiquidityButtonLabel = busyAction ?? (
     !wallet.address
       ? 'Connect wallet'
       : !wallet.onMonad
         ? 'Switch to Monad'
-        : approvalRequired0
-          ? `Approve ${tokenSymbol(pool?.token0 ?? null)}`
-          : approvalRequired1
-            ? `Approve ${tokenSymbol(pool?.token1 ?? null)}`
-            : pool?.hasLiquidity
-              ? 'Add liquidity'
-              : 'Seed the first position'
+        : wrap0 !== null || wrap1 !== null
+          ? 'Wrap MON'
+          : approvalRequired0
+            ? `Approve ${tokenSymbol(pool?.token0 ?? null)}`
+            : approvalRequired1
+              ? `Approve ${tokenSymbol(pool?.token1 ?? null)}`
+              : pool?.hasLiquidity
+                ? 'Add liquidity'
+                : 'Seed the first position'
   );
   const orderButtonLabel = busyAction ?? (
     !wallet.address
       ? 'Connect wallet'
       : !wallet.onMonad
         ? 'Switch to Monad'
-        : escrowApprovalRequired
-          ? `Approve ${tokenSymbol(escrowToken)}`
-          : orderSide === 'buy'
-            ? `Place bid for ${tokenSymbol(baseToken)}`
-            : `Place ask for ${tokenSymbol(baseToken)}`
+        : escrowWrap !== null
+          ? 'Wrap MON'
+          : escrowApprovalRequired
+            ? `Approve ${tokenSymbol(escrowToken)}`
+            : orderSide === 'buy'
+              ? `Place bid for ${tokenSymbol(baseToken)}`
+              : `Place ask for ${tokenSymbol(baseToken)}`
   );
   const createButtonLabel = busyAction ?? (
     !wallet.address ? 'Connect wallet' : !wallet.onMonad ? 'Switch to Monad' : 'Create SpotPool'
@@ -1921,9 +1983,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     ? 'Use a decimal amount within the token precision.'
     : insufficientBalance
       ? 'Balance is short of this amount.'
-      : tokenIn
-        ? `${wallet.address ? 'Approved' : 'Connect to approve'} · ERC20`
-        : 'Token metadata pending';
+      : swapWrap !== null
+        ? `Wraps ${formatUnits(swapWrap, 18, 4)} MON into ${tokenSymbol(tokenIn)} first.`
+        : tokenIn
+          ? `${wallet.address ? 'Approved' : 'Connect to approve'} · ERC20`
+          : 'Token metadata pending';
 
   const swapSubOut = currentQuoteError ?? (
     currentQuote === null
@@ -2013,8 +2077,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                         value={amountIn}
                         onValueChange={(value) => { setAmountIn(value); setActionError(null); }}
                         token={tokenIn}
-                        meta={wallet.address ? `Balance ${formatTokenValue(walletToken?.balance ?? null, tokenIn)}` : 'Connect for balance'}
-                        metaActionLabel={walletToken?.balance != null && walletToken.balance > 0n ? 'MAX' : undefined}
+                        meta={wallet.address ? balanceHint(tokenIn, walletToken?.balance, nativeBalance) : 'Connect for balance'}
+                        metaActionLabel={(spendableBalance(tokenIn, walletToken?.balance, nativeBalance) ?? 0n) > 0n ? 'MAX' : undefined}
                         onMetaAction={handleMaxAmount}
                         onTokenClick={() => setTokenSelect('in')}
                         sub={swapSubIn}
@@ -2104,12 +2168,13 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                         const setValue = side === 'token0' ? setAddAmount0 : setAddAmount1;
                         const parsed = side === 'token0' ? amount0In : amount1In;
                         const short = side === 'token0' ? insufficient0 : insufficient1;
+                        const wrap = side === 'token0' ? wrap0 : wrap1;
                         return (
                           <AmountField
                             key={side}
                             id={`dx-deposit-${side}`}
                             title={`Deposit ${tokenSymbol(token)}`}
-                            hint={wallet.address ? `Balance ${formatTokenValue(held?.balance ?? null, token)}` : 'Connect wallet'}
+                            hint={wallet.address ? balanceHint(token, held?.balance, nativeBalance) : 'Connect wallet'}
                             value={value}
                             onChange={(next) => { setValue(next); setActionError(null); }}
                             symbol={tokenSymbol(token)}
@@ -2121,9 +2186,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                                 ? 'Use a decimal amount within the token precision.'
                                 : short
                                   ? 'Balance is short of this amount.'
-                                  : poolRatioReady
-                                    ? 'Deposits outside the reserve ratio are refunded by the pool.'
-                                    : 'First deposit sets the opening price of the pool.'
+                                  : wrap !== null
+                                    ? `Wraps ${formatUnits(wrap, 18, 4)} MON into ${tokenSymbol(token)} first.`
+                                    : poolRatioReady
+                                      ? 'Deposits outside the reserve ratio are refunded by the pool.'
+                                      : 'First deposit sets the opening price of the pool.'
                             }
                           />
                         );
@@ -2257,15 +2324,16 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                         <AmountField
                           id="dx-order-amount"
                           title="Amount"
-                          hint={wallet.address ? `Balance ${formatTokenValue(walletToken0?.balance ?? null, baseToken)}` : 'Connect wallet'}
+                          hint={wallet.address ? balanceHint(baseToken, walletToken0?.balance, nativeBalance) : 'Connect wallet'}
                           value={orderAmount}
                           onChange={(next) => { setOrderAmount(next); setActionError(null); }}
                           symbol={tokenSymbol(baseToken)}
                           actionLabel="MAX"
                           actionDisabled={orderSide !== 'sell' || walletToken0?.balance == null}
                           onAction={() => {
-                            if (walletToken0?.balance == null || baseToken?.decimals == null) return;
-                            setOrderAmount(formatUnits(walletToken0.balance, baseToken.decimals, baseToken.decimals));
+                            const spendable = spendableBalance(baseToken, walletToken0?.balance, nativeBalance);
+                            if (spendable === null || baseToken?.decimals == null) return;
+                            setOrderAmount(formatUnits(spendable, baseToken.decimals, baseToken.decimals));
                           }}
                           note={`Always denominated in ${tokenSymbol(baseToken)}, the pair's base token.`}
                         />

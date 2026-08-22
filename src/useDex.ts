@@ -27,7 +27,7 @@ import {
   readSpotQuote as readDexSpotQuote,
   simulateSwapExactIn as simulateDexSwapExactIn,
 } from './dex.ts';
-import { rpcBatch } from './chain.ts';
+import { decodeUint, rpcBatch } from './chain.ts';
 
 export type DexRegistryStatus = 'healthy' | 'degraded' | 'unavailable';
 
@@ -131,6 +131,8 @@ export type DexWalletSnapshot = {
   token0: DexWalletToken | null;
   token1: DexWalletToken | null;
   shares: bigint | null;
+  /** Native MON, so the UI can offer to wrap it into WMON on demand. */
+  native: bigint | null;
 };
 
 export type DexState = {
@@ -423,7 +425,13 @@ async function readDexState(
   });
 
   const walletSharesIndex = wallet ? extraCalls.length : null;
-  if (wallet) extraCalls.push(dexCall(poolAddress, encodeSharesOf(wallet)));
+  const walletNativeIndex = wallet ? extraCalls.length + 1 : null;
+  if (wallet) {
+    extraCalls.push(
+      dexCall(poolAddress, encodeSharesOf(wallet)),
+      { method: 'eth_getBalance', params: [wallet, 'latest'] },
+    );
+  }
 
   const orderbookIndexes = pairId && pairIdVerified
     ? {
@@ -473,6 +481,8 @@ async function readDexState(
             }
           : null,
         shares: walletSharesIndex === null ? null : decodeDexUint(extraResults[walletSharesIndex]),
+        // `eth_getBalance` returns a minimal-width quantity, not a padded ABI word.
+        native: walletNativeIndex === null ? null : decodeUint(extraResults[walletNativeIndex]),
       }
     : null;
 

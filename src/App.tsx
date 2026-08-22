@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ChangeEvent, 
 import {
   CONTRACTS,
   MONAD,
+  MON_NATIVE_GAS_RESERVE,
   encodeApprove,
   encodeCollectStakingRewards,
   encodeClaimNFTRewards,
@@ -73,7 +74,6 @@ type Activity = {
 
 /** Placeholder for a value the chain has not returned (yet, or at all). */
 const PENDING = '—';
-const MON_NATIVE_GAS_RESERVE = 250_000_000_000_000_000n; // 0.25 MON fallback
 const MON_NATIVE_GAS_CUSHION = 10_000_000_000_000_000n; // 0.01 MON
 const MON_NATIVE_GAS_ESTIMATE_VALUE = 1n;
 

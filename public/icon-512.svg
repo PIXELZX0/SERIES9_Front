@@ -1,6 +1,48 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#0a0a09"/>
-  <circle cx="32" cy="32" r="23" fill="none" stroke="#c9a45d" stroke-width="2"/>
-  <path d="M40.4 19.5c-2.6-1.7-5.7-2.7-9-2.7-9 0-16.2 6.8-16.2 15.2s7.2 15.2 16.2 15.2c3.4 0 6.5-1 9.1-2.7" fill="none" stroke="#e8c46a" stroke-width="4" stroke-linecap="round"/>
-  <path d="M23 24.4h16.8M23 39.6h16.8" stroke="#f4f0e6" stroke-width="3" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="512" height="512">
+  <defs>
+    <path id="rim-512" d="M 128,26 a 102,102 0 1,1 -0.01,0" fill="none"/>
+  </defs>
+
+  <!-- coin base -->
+  <rect width="256" height="256" fill="#0a0a09"/>
+  <circle cx="128" cy="128" r="128" fill="#0a0a0a"/>
+  <circle cx="128" cy="128" r="121" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.9"/>
+  <circle cx="128" cy="128" r="92" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.28"/>
+
+  <!-- rim text: SERIES9 repeating -->
+  <text font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="13" font-weight="500" letter-spacing="2"
+        text-anchor="middle" fill="#ffffff" fill-opacity="0.55">
+    <textPath href="#rim-512" startOffset="8.333%">SERIES9</textPath>
+    <textPath href="#rim-512" startOffset="25%">SERIES9</textPath>
+    <textPath href="#rim-512" startOffset="41.667%">SERIES9</textPath>
+    <textPath href="#rim-512" startOffset="58.333%">SERIES9</textPath>
+    <textPath href="#rim-512" startOffset="75%">SERIES9</textPath>
+    <textPath href="#rim-512" startOffset="91.667%">SERIES9</textPath>
+  </text>
+  <g fill="#d4af37">
+    <circle cx="128" cy="22" r="2"/>
+    <circle cx="219.8" cy="75" r="2"/>
+    <circle cx="219.8" cy="181" r="2"/>
+    <circle cx="128" cy="234" r="2"/>
+    <circle cx="36.2" cy="181" r="2"/>
+    <circle cx="36.2" cy="75" r="2"/>
+  </g>
+
+  <!-- concave 4-pointed star -->
+  <path fill="#ffffff" d="M 128,52
+    Q 141.44,114.56 204,128
+    Q 141.44,141.44 128,204
+    Q 114.56,141.44 52,128
+    Q 114.56,114.56 128,52 Z"/>
+  <path fill="#0a0a0a" d="M 128,73.28
+    Q 137.67,118.33 182.72,128
+    Q 137.67,137.67 128,182.72
+    Q 118.33,137.67 73.28,128
+    Q 118.33,118.33 128,73.28 Z"/>
+  <path fill="#d4af37" d="M 128,99.12
+    Q 133.11,122.89 156.88,128
+    Q 133.11,133.11 128,156.88
+    Q 122.89,133.11 99.12,128
+    Q 122.89,122.89 128,99.12 Z"/>
 </svg>

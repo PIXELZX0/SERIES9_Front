@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
   CONTRACTS,
   MONAD,
@@ -692,19 +692,62 @@ function ButtonArrow() {
 }
 
 function BrandMark() {
+  const rimId = useId();
+
   return (
     <span className="brand__mark" aria-hidden="true">
-      <svg viewBox="0 0 64 64" width={31} height={31} focusable="false">
-        <rect width="64" height="64" rx="14" fill="#0a0a09" />
-        <circle cx="32" cy="32" r="23" fill="none" stroke="#c9a45d" strokeWidth="2" />
+      <svg viewBox="0 0 256 256" width={31} height={31} focusable="false">
+        <defs>
+          <path id={rimId} d="M 128,26 a 102,102 0 1,1 -0.01,0" fill="none" />
+        </defs>
+        <circle cx="128" cy="128" r="128" fill="#0a0a0a" />
+        <circle cx="128" cy="128" r="121" fill="none" stroke="#ffffff" strokeWidth="1.5" opacity="0.9" />
+        <circle cx="128" cy="128" r="92" fill="none" stroke="#ffffff" strokeWidth="1" opacity="0.28" />
+        <g>
+          <text
+            fontFamily="'Helvetica Neue', Helvetica, Arial, sans-serif"
+            fontSize="13"
+            fontWeight="500"
+            letterSpacing="2"
+            textAnchor="middle"
+            fill="#ffffff"
+            fillOpacity="0.55"
+          >
+            {['8.333%', '25%', '41.667%', '58.333%', '75%', '91.667%'].map((offset) => (
+              <textPath href={`#${rimId}`} key={offset} startOffset={offset}>
+                SERIES9
+              </textPath>
+            ))}
+          </text>
+          <g fill="#d4af37">
+            <circle cx="128" cy="22" r="2" />
+            <circle cx="219.8" cy="75" r="2" />
+            <circle cx="219.8" cy="181" r="2" />
+            <circle cx="128" cy="234" r="2" />
+            <circle cx="36.2" cy="181" r="2" />
+            <circle cx="36.2" cy="75" r="2" />
+          </g>
+          <animateTransform
+            attributeName="transform"
+            type="rotate"
+            from="0 128 128"
+            to="360 128 128"
+            dur="40s"
+            repeatCount="indefinite"
+          />
+        </g>
         <path
-          d="M40.4 19.5c-2.6-1.7-5.7-2.7-9-2.7-9 0-16.2 6.8-16.2 15.2s7.2 15.2 16.2 15.2c3.4 0 6.5-1 9.1-2.7"
-          fill="none"
-          stroke="#e8c46a"
-          strokeWidth="4"
-          strokeLinecap="round"
+          fill="#ffffff"
+          d="M 128,52 Q 141.44,114.56 204,128 Q 141.44,141.44 128,204 Q 114.56,141.44 52,128 Q 114.56,114.56 128,52 Z"
         />
-        <path d="M23 24.4h16.8M23 39.6h16.8" fill="none" stroke="#f4f0e6" strokeWidth="3" strokeLinecap="round" />
+        <path
+          fill="#0a0a0a"
+          d="M 128,73.28 Q 137.67,118.33 182.72,128 Q 137.67,137.67 128,182.72 Q 118.33,137.67 73.28,128 Q 118.33,118.33 128,73.28 Z"
+        />
+        <path
+          fill="#d4af37"
+          d="M 128,99.12 Q 133.11,122.89 156.88,128 Q 133.11,133.11 128,156.88 Q 122.89,133.11 99.12,128 Q 122.89,122.89 128,99.12 Z"
+        />
       </svg>
     </span>
   );

@@ -413,9 +413,9 @@ function currentPage(pathname = window.location.pathname): Page {
 
 const navLinks: Array<{ label: string; href: string; id: SectionId }> = [
   { label: 'Overview', href: routeHref('/', '#overview'), id: 'overview' },
-  { label: 'Identity', href: routeHref('/identity'), id: 'identity' },
-  { label: 'Staking', href: routeHref('/staking'), id: 'staking' },
   { label: 'Tokenomics', href: routeHref('/tokenomics'), id: 'tokenomics' },
+  { label: 'Staking', href: routeHref('/staking'), id: 'staking' },
+  { label: 'Identity', href: routeHref('/identity'), id: 'identity' },
   { label: 'DEX', href: routeHref('/dex'), id: 'dex' },
   { label: 'Moderator', href: routeHref('/moderator'), id: 'moderator' },
   { label: 'Pulse', href: routeHref('/', '#pulse'), id: 'pulse' },

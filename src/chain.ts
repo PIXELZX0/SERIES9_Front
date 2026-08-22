@@ -30,6 +30,14 @@ export const CONTRACTS = {
   dexPositionManager: env.VITE_DEX_POSITION_MANAGER_ADDRESS ?? '0x5520B4F76A69F2aD053C4C0b26a5a860220e3277',
 } as const;
 
+/** Canonical third-party ERC20s surfaced by the DEX UI (Monad mainnet). */
+export const TOKENS = {
+  /** Wrapped MON — native MON has no address, pools need the ERC-20 form. */
+  wmon: env.VITE_WMON_ADDRESS ?? '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A',
+  /** Circle-native USDC. */
+  usdc: env.VITE_USDC_ADDRESS ?? '0x754704Bc059F8C67012fEd69BC8A327a5aafb603',
+} as const;
+
 export const SELECTOR = {
   totalStaked: '0x817b1cd2',
   balanceOf: '0x70a08231',
@@ -543,4 +551,19 @@ export function shortenAddress(address: string): string {
 
 export function explorerAddressUrl(address: string): string {
   return `${MONAD.explorer}/monad/address/${address}`;
+}
+
+/**
+ * Accept only image sources that are safe to render: http(s), data images,
+ * site-relative paths, or gateway-resolvable IPFS URIs.
+ */
+export function normalizeTokenImageUri(value: string | null | undefined): string | null {
+  const uri = value?.trim();
+  if (!uri) return null;
+  if (/^https?:\/\//i.test(uri) || /^data:image\//i.test(uri)) return uri;
+  if (/^(?:\/|\.\.?\/)/.test(uri)) return uri;
+  if (!/^ipfs:\/\//i.test(uri)) return null;
+
+  const path = uri.replace(/^ipfs:\/\//i, '').replace(/^ipfs\//i, '');
+  return path ? `https://ipfs.io/ipfs/${path}` : null;
 }

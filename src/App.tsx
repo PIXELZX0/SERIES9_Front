@@ -22,6 +22,7 @@ import {
   explorerAddressUrl,
   formatCompact,
   formatUnits,
+  normalizeTokenImageUri,
   shortenAddress,
 } from './chain.ts';
 import { useWallet } from './useWallet.ts';
@@ -162,17 +163,6 @@ const LOCAL_TOKEN_LOGOS: Record<TokenKind, string> = {
   SER9: `${import.meta.env.BASE_URL}token-logos/ser9.svg`,
   MON: `${import.meta.env.BASE_URL}token-logos/mon.svg`,
 };
-
-function normalizeTokenImageUri(value: string | null | undefined): string | null {
-  const uri = value?.trim();
-  if (!uri) return null;
-  if (/^https?:\/\//i.test(uri) || /^data:image\//i.test(uri)) return uri;
-  if (/^(?:\/|\.\.?\/)/.test(uri)) return uri;
-  if (!/^ipfs:\/\//i.test(uri)) return null;
-
-  const path = uri.replace(/^ipfs:\/\//i, '').replace(/^ipfs\//i, '');
-  return path ? `https://ipfs.io/ipfs/${path}` : null;
-}
 
 function IdentityNftArtwork({
   imageUri,

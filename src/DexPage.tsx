@@ -24,7 +24,18 @@ import {
   simulateDexWrite,
 } from './dex.ts';
 import { computePairId } from './keccak.ts';
-import { CONTRACTS, explorerAddressUrl, formatUnits, shortenAddress } from './chain.ts';
+import {
+  CONTRACTS,
+  TOKENS,
+  SELECTOR,
+  decodeString,
+  ethCall,
+  explorerAddressUrl,
+  formatUnits,
+  normalizeTokenImageUri,
+  rpcBatch,
+  shortenAddress,
+} from './chain.ts';
 import { useDex, type DexOpenOrder, type DexPoolSnapshot, type DexToken } from './useDex.ts';
 import { dexHref, useDexSection, type DexTab } from './useDexRoute.ts';
 import type { WalletState } from './useWallet.ts';
@@ -87,9 +98,19 @@ const FEE_PRESETS: Array<{ ppm: string; label: string; note: string }> = [
 ];
 
 /** Curated tokens offered in the create-tab address dropdown (pool tokens are appended at runtime). */
-const CREATE_TOKEN_CATALOG: DexToken[] = [
+type CatalogToken = DexToken & { note?: string };
+
+const CREATE_TOKEN_CATALOG: CatalogToken[] = [
   { address: CONTRACTS.ser9, symbol: 'SER9', decimals: 18 },
+  { address: TOKENS.wmon, symbol: 'MON', decimals: 18, note: 'wrapped' },
+  { address: TOKENS.usdc, symbol: 'USDC', decimals: 6 },
 ];
+
+/** Locally hosted logos used when a token's on-chain `image()` metadata is missing. */
+const KNOWN_TOKEN_IMAGES: Record<string, string> = {
+  [CONTRACTS.ser9.toLowerCase()]: `${import.meta.env.BASE_URL}token-logos/ser9.svg`,
+  [TOKENS.wmon.toLowerCase()]: `${import.meta.env.BASE_URL}token-logos/mon.svg`,
+};
 
 const REMOVE_PERCENTS = [25, 50, 75, 100] as const;
 
@@ -360,7 +381,52 @@ function badgeGradient(address: string): string {
   return `linear-gradient(135deg, ${from}, ${to})`;
 }
 
+const tokenImageCache = new Map<string, string | null>();
+const tokenImagePending = new Map<string, Promise<string | null>>();
+
+/**
+ * Resolve a token logo: the ERC-20's own `image()` metadata first, then a
+ * locally hosted known logo, otherwise null so callers fall back to initials.
+ */
+function requestTokenImage(addressKey: string): Promise<string | null> {
+  const cached = tokenImageCache.get(addressKey);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const pending = tokenImagePending.get(addressKey);
+  if (pending) return pending;
+
+  const request = rpcBatch([ethCall(addressKey, SELECTOR.image)])
+    .then((results) => normalizeTokenImageUri(decodeString(results[0])) ?? '')
+    .catch(() => '')
+    .then((uri) => {
+      const resolved = uri || KNOWN_TOKEN_IMAGES[addressKey] || null;
+      tokenImageCache.set(addressKey, resolved);
+      tokenImagePending.delete(addressKey);
+      return resolved;
+    });
+  tokenImagePending.set(addressKey, request);
+  return request;
+}
+
+function useTokenImage(address: string | null): string | null {
+  const key = address?.toLowerCase() ?? null;
+  const [image, setImage] = useState<string | null>(
+    () => (key ? tokenImageCache.get(key) ?? KNOWN_TOKEN_IMAGES[key] ?? null : null));
+  useEffect(() => {
+    if (!key) return;
+    let cancelled = false;
+    void requestTokenImage(key).then((resolved) => {
+      if (!cancelled && resolved !== null) setImage(resolved);
+    });
+    return () => { cancelled = true; };
+  }, [key]);
+  return image;
+}
+
 function TokenBadge({ token }: { token: DexToken | null }) {
+  const remoteImage = useTokenImage(token?.address ?? null);
+  // The last source that failed to load; a newly resolved image simply differs.
+  const [failedSource, setFailedSource] = useState<string | null>(null);
+
   if (!token) {
     return (
       <span className="dx-badge dx-badge--empty" aria-hidden="true">
@@ -369,9 +435,14 @@ function TokenBadge({ token }: { token: DexToken | null }) {
     );
   }
   const initials = (token.symbol?.trim() || token.address.slice(2, 5)).slice(0, 3).toUpperCase();
+  const image = remoteImage !== null && remoteImage !== failedSource ? remoteImage : null;
   return (
-    <span className="dx-badge" style={{ background: badgeGradient(token.address) }} aria-hidden="true">
-      {initials}
+    <span
+      className="dx-badge"
+      style={image === null ? { background: badgeGradient(token.address) } : undefined}
+      aria-hidden="true"
+    >
+      {image ? <img src={image} alt="" onError={() => setFailedSource(image)} /> : initials}
     </span>
   );
 }
@@ -687,7 +758,7 @@ function TokenSelectDialog({ side, tokens, balances, selectedIn, selectedOut, on
 
 type CreateAddressFieldProps = {
   value: string;
-  tokens: DexToken[];
+  tokens: CatalogToken[];
   excludeAddress: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -742,6 +813,7 @@ function CreateAddressField({ value, tokens, excludeAddress, open, onOpenChange,
             >
               <TokenBadge token={token} />
               <strong>{tokenSymbol(token)}</strong>
+              {token.note && <em className="dx-pickmenu__note">{token.note}</em>}
               <code>{shortenAddress(token.address)}</code>
             </button>
           ))}
@@ -1058,14 +1130,14 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const openOrders = dex.myOrders.filter((entry) => ['OPEN', 'PARTIAL'].includes(orderStatusLabel(entry, nowSeconds)));
   const closedOrders = dex.myOrders.filter((entry) => !openOrders.includes(entry));
 
-  const createTokenCatalog = useMemo(() => {
-    const byKey = new Map<string, DexToken>();
-    const add = (token: DexToken | null) => {
+  const createTokenCatalog = useMemo<CatalogToken[]>(() => {
+    const byKey = new Map<string, CatalogToken>();
+    const add = (token: CatalogToken | null) => {
       if (token) byKey.set(token.address.toLowerCase(), token);
     };
+    CREATE_TOKEN_CATALOG.forEach(add);
     add(pool?.token0 ?? null);
     add(pool?.token1 ?? null);
-    CREATE_TOKEN_CATALOG.forEach(add);
     return [...byKey.values()];
   }, [pool?.token0, pool?.token1]);
 

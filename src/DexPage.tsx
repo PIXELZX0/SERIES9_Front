@@ -365,6 +365,188 @@ function PoolMetric({ label, value, note }: { label: string; value: string; note
   );
 }
 
+const BADGE_GRADIENTS = [
+  ['#c9a45d', '#76571f'],
+  ['#6a7f56', '#2f3d27'],
+  ['#b15b42', '#5c2417'],
+  ['#8a7fb8', '#3c3460'],
+  ['#4f8a8b', '#1f4041'],
+  ['#c47d5d', '#6b3a24'],
+] as const;
+
+function badgeGradient(address: string): string {
+  let hash = 0;
+  for (let index = 2; index < address.length; index += 1) {
+    hash = (hash * 31 + address.charCodeAt(index)) >>> 0;
+  }
+  const [from, to] = BADGE_GRADIENTS[hash % BADGE_GRADIENTS.length];
+  return `linear-gradient(135deg, ${from}, ${to})`;
+}
+
+function TokenBadge({ token }: { token: DexToken | null }) {
+  if (!token) return <span className="dex-token-badge dex-token-badge--empty" aria-hidden="true">?</span>;
+  const initials = (token.symbol?.trim() || token.address.slice(2, 5)).slice(0, 3).toUpperCase();
+  return (
+    <span className="dex-token-badge" style={{ background: badgeGradient(token.address) }} aria-hidden="true">
+      {initials}
+    </span>
+  );
+}
+
+type SwapSettingsProps = {
+  open: boolean;
+  slippage: string;
+  onSlippageChange: (value: string) => void;
+  onClose: () => void;
+};
+
+function SwapSettings({ open, slippage, onSlippageChange, onClose }: SwapSettingsProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  const parsed = parseSlippageBps(slippage);
+
+  return (
+    <>
+      <button type="button" className="dex-pop-backdrop" aria-label="Close swap settings" onClick={onClose} />
+      <div className="dex-settings" role="dialog" aria-label="Swap settings">
+        <div className="dex-settings__head">
+          <h3>Swap settings</h3>
+          <button type="button" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <span className="dex-settings__label">Max slippage</span>
+        <div className="dex-settings__row" role="group" aria-label="Slippage presets">
+          {['0.1', '0.5', '1'].map((preset) => (
+            <button
+              key={preset}
+              type="button"
+              className={`dex-chip${slippage === preset ? ' dex-chip--active' : ''}`}
+              onClick={() => onSlippageChange(preset)}
+            >
+              {preset}%
+            </button>
+          ))}
+          <label className={`dex-chip dex-chip--custom${slippage !== '0.1' && slippage !== '0.5' && slippage !== '1' ? ' dex-chip--active' : ''}`}>
+            <input
+              ref={inputRef}
+              value={slippage}
+              onChange={(event) => onSlippageChange(event.target.value)}
+              placeholder="Custom"
+              inputMode="decimal"
+              autoComplete="off"
+              aria-label="Custom slippage percent"
+            />
+            %
+          </label>
+        </div>
+        <small className="dex-settings__hint">
+          {parsed === null
+            ? 'Enter a slippage between 0 and 50%.'
+            : 'Swaps revert instead of filling below this floor.'}
+        </small>
+      </div>
+    </>
+  );
+}
+
+type TokenSelectSide = 'in' | 'out';
+
+type TokenSelectDialogProps = {
+  side: TokenSelectSide;
+  tokens: DexToken[];
+  balances: Array<bigint | null>;
+  selectedIn: DexToken | null;
+  selectedOut: DexToken | null;
+  onSelect: (token: DexToken) => void;
+  onClose: () => void;
+};
+
+function TokenSelectDialog({ side, tokens, balances, selectedIn, selectedOut, onSelect, onClose }: TokenSelectDialogProps) {
+  const [query, setQuery] = useState('');
+  const other = side === 'in' ? selectedOut : selectedIn;
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const normalized = query.trim().toLowerCase();
+  const visible = tokens.filter((token) =>
+    !normalized ||
+    token.symbol?.toLowerCase().includes(normalized) ||
+    token.address.toLowerCase().includes(normalized));
+
+  return (
+    <div className="dex-dialog-layer" role="presentation">
+      <button type="button" className="dex-pop-backdrop" aria-label="Close token selector" onClick={onClose} />
+      <div className="dex-token-dialog" role="dialog" aria-modal="true" aria-label={`Select the ${side === 'in' ? 'send' : 'receive'} token`}>
+        <div className="dex-settings__head">
+          <h3>{side === 'in' ? 'You send' : 'You receive'}</h3>
+          <button type="button" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <input
+          className="dex-token-dialog__search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search by symbol or address"
+          spellCheck="false"
+          autoComplete="off"
+        />
+        <div className="dex-token-dialog__list">
+          {visible.map((token, index) => {
+            const isSelected = token.address === selectedIn?.address || token.address === selectedOut?.address;
+            return (
+              <button
+                key={token.address}
+                type="button"
+                className={`dex-token-option${isSelected ? ' dex-token-option--selected' : ''}`}
+                onClick={() => onSelect(token)}
+              >
+                <TokenBadge token={token} />
+                <span className="dex-token-option__meta">
+                  <strong>{tokenSymbol(token)}</strong>
+                  <code>{shortenAddress(token.address)}</code>
+                </span>
+                <span className="dex-token-option__balance">{formatTokenValue(balances[index] ?? null, token, 4)}</span>
+              </button>
+            );
+          })}
+          {visible.length === 0 && (
+            <p className="dex-panel-empty">No token in the loaded pool matches “{query}”.</p>
+          )}
+        </div>
+        {other && <small className="dex-settings__hint">The other side of the pair stays {tokenSymbol(other)}.</small>}
+      </div>
+    </div>
+  );
+}
+
+function invertPriceX18(priceX18: bigint): bigint | null {
+  return priceX18 > 0n ? 10n ** 36n / priceX18 : null;
+}
+
+function GearIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />
+    </svg>
+  );
+}
+
 function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [poolAddressInput, setPoolAddressInput] = useState(DEX_CONFIG.spotPoolAddress ?? '');
   const [activePoolAddress, setActivePoolAddress] = useState<string | null>(DEX_CONFIG.spotPoolAddress);
@@ -402,6 +584,9 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [createTokenB, setCreateTokenB] = useState('');
   const [createFeePpm, setCreateFeePpm] = useState('3000');
   const [createTickSize, setCreateTickSize] = useState('1');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tokenSelect, setTokenSelect] = useState<TokenSelectSide | null>(null);
+  const [rateInverted, setRateInverted] = useState(false);
 
   const writeInFlightRef = useRef(false);
   const writeLockWalletRef = useRef<string | null>(null);
@@ -435,6 +620,19 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const minimumOut = currentQuote !== null && slippageBps !== null
     ? applySlippageFloor(currentQuote, slippageBps)
     : null;
+  const spotForRate = pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null;
+  const priceToken1Per0 = formatPriceX18(spotForRate, pool?.token0 ?? null, pool?.token1 ?? null);
+  const priceToken0Per1 = formatPriceX18(
+    spotForRate === null ? null : invertPriceX18(spotForRate),
+    pool?.token1 ?? null,
+    pool?.token0 ?? null,
+  );
+  const naturalRate = direction === 'token0' ? priceToken1Per0 : priceToken0Per1;
+  const inverseRate = direction === 'token0' ? priceToken0Per1 : priceToken1Per0;
+  const swapRateValue = rateInverted ? inverseRate : naturalRate;
+  const swapRateBase = rateInverted
+    ? (direction === 'token0' ? tokenOut : tokenIn)
+    : tokenIn;
   const onchainAllowance = walletToken?.allowance ?? null;
   const approvalRequired = inputAmount !== null && (onchainAllowance === null || inputAmount > onchainAllowance);
   const insufficientBalance = wallet.address !== null &&
@@ -1227,14 +1425,23 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const emptyState = activePoolAddress === null;
   const statusLabel = networkState === 'live' ? 'ONCHAIN / LIVE' : networkState === 'loading' ? 'ONCHAIN / READING' : 'ONCHAIN / DEGRADED';
   const walletBusy = busyAction !== null || wallet.connecting || wallet.switching || unresolvedTransaction !== null;
+  const swapCtaReady = !wallet.address || !wallet.onMonad
+    ? true
+    : actionReady;
   const tradeButtonLabel = busyAction ?? (
     !wallet.address
       ? 'Connect wallet'
       : !wallet.onMonad
         ? 'Switch to Monad'
-        : approvalRequired
-          ? `Approve ${tokenSymbol(tokenIn)}`
-          : `Swap ${tokenSymbol(tokenIn)} -> ${tokenSymbol(tokenOut)}`
+        : amountIn.trim() === '' || inputAmount === null
+          ? 'Enter an amount'
+          : insufficientBalance
+            ? `Insufficient ${tokenSymbol(tokenIn)} balance`
+            : approvalRequired
+              ? `Approve ${tokenSymbol(tokenIn)}`
+              : currentQuoteLoading && currentQuote === null
+                ? 'Fetching quote'
+                : `Swap ${tokenSymbol(tokenIn)} for ${tokenSymbol(tokenOut)}`
   );
   const addLiquidityButtonLabel = busyAction ?? (
     !wallet.address
@@ -1314,6 +1521,23 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           </div>
         )}
 
+        {tokenSelect !== null && pool?.valid && pool.token0 !== null && pool.token1 !== null && (
+          <TokenSelectDialog
+            side={tokenSelect}
+            tokens={[pool.token0, pool.token1]}
+            balances={[walletToken0?.balance ?? null, walletToken1?.balance ?? null]}
+            selectedIn={tokenIn}
+            selectedOut={tokenOut}
+            onSelect={(selected) => {
+              const lower = selected.address.toLowerCase();
+              if (pool.token0 && lower === pool.token0.address.toLowerCase()) setDirection('token0');
+              else if (pool.token1 && lower === pool.token1.address.toLowerCase()) setDirection('token1');
+              setTokenSelect(null);
+            }}
+            onClose={() => setTokenSelect(null)}
+          />
+        )}
+
         <div className="dex-terminal-layout">
           <section className="dex-terminal" aria-labelledby="dex-terminal-title">
             <div className="dex-terminal__header">
@@ -1321,9 +1545,26 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 <span className="panel-kicker">SPOT / ONCHAIN WRITES</span>
                 <h2 id="dex-terminal-title">Trading terminal</h2>
               </div>
-              <span className={`dex-terminal__state${poolReady ? ' dex-terminal__state--ready' : ''}`}>
-                {poolReady ? 'READY' : poolVerified ? 'NO LIQUIDITY' : pool?.valid ? 'VERIFY WIRING' : 'POOL REQUIRED'}
-              </span>
+              <div className="dex-header-tools">
+                <span className={`dex-terminal__state${poolReady ? ' dex-terminal__state--ready' : ''}`}>
+                  {poolReady ? 'READY' : poolVerified ? 'NO LIQUIDITY' : pool?.valid ? 'VERIFY WIRING' : 'POOL REQUIRED'}
+                </span>
+                <button
+                  type="button"
+                  className={`dex-gear${settingsOpen ? ' dex-gear--open' : ''}`}
+                  aria-label="Swap settings"
+                  aria-expanded={settingsOpen}
+                  onClick={() => setSettingsOpen((open) => !open)}
+                >
+                  <GearIcon />
+                </button>
+                <SwapSettings
+                  open={settingsOpen}
+                  slippage={slippage}
+                  onSlippageChange={(value) => { setSlippage(value); setActionError(null); }}
+                  onClose={() => setSettingsOpen(false)}
+                />
+              </div>
             </div>
 
             <div className="dex-tabs dex-tabs--four" role="tablist" aria-label="DEX actions">
@@ -1350,33 +1591,41 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             </div>
 
             <div className="dex-terminal__body">
-              <div className="dex-pool-loader">
-                <label htmlFor="dex-pool-address">Active SpotPool</label>
-                <div className="dex-pool-loader__row">
-                  <input
-                    id="dex-pool-address"
-                    value={poolAddressInput}
-                    onChange={(event) => {
-                      setPoolAddressInput(event.target.value);
-                      setActionError(null);
-                    }}
-                    placeholder="0x... deployed SpotPool"
-                    spellCheck="false"
-                    autoComplete="off"
-                  />
-                  <button className="dex-button dex-button--outline" type="button" onClick={handleLoadPool}>
-                    Load
-                  </button>
-                </div>
-                <small>
-                  {DEX_CONFIG.spotPoolAddress
-                    ? 'Seeded from VITE_DEX_SPOT_POOL_ADDRESS. Paste another deployed pool, or find one by token pair below.'
-                    : 'No pool is seeded by deployment. Paste an address, find one by token pair, or create a pool.'}
-                </small>
+              <div className="dex-pool-strip">
+                <span className={`dex-pool-strip__dot${poolVerified ? ' dex-pool-strip__dot--ok' : ''}`} aria-hidden="true" />
+                <code className="dex-pool-strip__address">
+                  {activePoolAddress ? shortenAddress(activePoolAddress) : 'NO POOL LOADED'}
+                </code>
+                <span className="dex-pool-strip__note">
+                  {poolVerified
+                    ? `registry verified / ${formatFeePpm(pool?.feePpm ?? null)} LP fee`
+                    : activePoolAddress
+                      ? 'not verified'
+                      : 'load a pool below to trade'}
+                </span>
               </div>
 
               <details className="dex-finder" open={emptyState}>
-                <summary>Find a pool by token pair</summary>
+                <summary>Change pool — paste an address or search the pair</summary>
+                <div className="dex-finder__manual">
+                  <label htmlFor="dex-pool-address">Active SpotPool</label>
+                  <div className="dex-pool-loader__row">
+                    <input
+                      id="dex-pool-address"
+                      value={poolAddressInput}
+                      onChange={(event) => {
+                        setPoolAddressInput(event.target.value);
+                        setActionError(null);
+                      }}
+                      placeholder="0x... deployed SpotPool"
+                      spellCheck="false"
+                      autoComplete="off"
+                    />
+                    <button className="dex-button dex-button--outline" type="button" onClick={handleLoadPool}>
+                      Load
+                    </button>
+                  </div>
+                </div>
                 <form className="dex-finder__form" onSubmit={handleFindPools}>
                   <label>
                     <span>Token A</span>
@@ -1424,7 +1673,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
               {tab === 'swap' && (
                 <form
-                  className="dex-tabpanel"
+                  className="dex-tabpanel dex-swap-form"
                   id="dex-panel-swap"
                   role="tabpanel"
                   aria-labelledby="dex-tab-swap"
@@ -1447,30 +1696,17 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                     </div>
                   ) : (
                     <>
-                      <div className="dex-token-pair">
-                        <div className="dex-token-box">
-                          <span>YOU SEND</span>
-                          <strong>{tokenSymbol(tokenIn)}</strong>
-                          <code>{tokenIn ? shortenAddress(tokenIn.address) : EMPTY}</code>
+                      <div className={`dex-swap-panel${insufficientBalance ? ' dex-swap-panel--error' : ''}`}>
+                        <div className="dex-swap-panel__top">
+                          <span>You pay</span>
+                          <i>
+                            <span>{wallet.address ? `Balance ${formatTokenValue(walletToken?.balance ?? null, tokenIn)}` : 'Connect for balance'}</span>
+                            {walletToken?.balance != null && walletToken.balance > 0n && (
+                              <button type="button" onClick={handleMaxAmount}>MAX</button>
+                            )}
+                          </i>
                         </div>
-                        <button
-                          className="dex-direction-toggle"
-                          type="button"
-                          aria-label="Reverse token direction"
-                          onClick={() => setDirection((current) => current === 'token0' ? 'token1' : 'token0')}
-                        >
-                          <span aria-hidden="true">&lt;-&gt;</span>
-                        </button>
-                        <div className="dex-token-box dex-token-box--receive">
-                          <span>YOU RECEIVE</span>
-                          <strong>{tokenSymbol(tokenOut)}</strong>
-                          <code>{tokenOut ? shortenAddress(tokenOut.address) : EMPTY}</code>
-                        </div>
-                      </div>
-
-                      <label className="dex-amount-field" htmlFor="dex-amount-in">
-                        <span><b>Amount in</b><i>Balance {wallet.address ? formatTokenValue(walletToken?.balance ?? null, tokenIn) : 'connect wallet'}</i></span>
-                        <div>
+                        <div className="dex-swap-panel__main">
                           <input
                             id="dex-amount-in"
                             value={amountIn}
@@ -1481,48 +1717,93 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                             placeholder="0.00"
                             inputMode="decimal"
                             autoComplete="off"
-                            aria-describedby="dex-amount-note"
+                            aria-label={`Amount of ${tokenSymbol(tokenIn)} to send`}
                           />
-                          <strong>{tokenSymbol(tokenIn)}</strong>
-                          <button type="button" onClick={handleMaxAmount} disabled={walletToken?.balance == null}>MAX</button>
+                          <button type="button" className="dex-token-pill" onClick={() => setTokenSelect('in')} aria-label={`Change the send token, currently ${tokenSymbol(tokenIn)}`}>
+                            <TokenBadge token={tokenIn} />
+                            <strong>{tokenSymbol(tokenIn)}</strong>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+                          </button>
                         </div>
-                        <small id="dex-amount-note">
-                          {inputAmount === null && amountIn
+                        <small className="dex-swap-panel__sub">
+                          {inputAmount === null && amountIn.trim() !== ''
                             ? 'Use a decimal amount within the token precision.'
                             : insufficientBalance
-                              ? `Balance is short of this amount.`
-                              : tokenIn ? `${tokenIn.decimals ?? '?'} decimals` : 'Token metadata pending'}
+                              ? 'Balance is short of this amount.'
+                              : tokenIn
+                                ? `${tokenIn.decimals ?? '?'} decimals / ERC20 approve then swapExactIn`
+                                : 'Token metadata pending'}
                         </small>
-                      </label>
+                      </div>
 
-                      <div className="dex-quote-panel" aria-live="polite">
-                        <div className="dex-quote-panel__main">
-                          <span>ESTIMATED RECEIVED</span>
-                          <strong>{currentQuoteLoading ? 'Reading...' : formatTokenValue(currentQuote, tokenOut, 6)}</strong>
-                          <small>{tokenOut ? tokenSymbol(tokenOut) : 'quote unavailable'} / pool quote</small>
+                      <div className="dex-flip-row">
+                        <button
+                          type="button"
+                          className="dex-flip"
+                          aria-label="Reverse swap direction"
+                          onClick={() => setDirection((current) => current === 'token0' ? 'token1' : 'token0')}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg>
+                        </button>
+                      </div>
+
+                      <div className="dex-swap-panel dex-swap-panel--out">
+                        <div className="dex-swap-panel__top">
+                          <span>You receive</span>
+                          <i>
+                            {currentQuoteLoading && currentQuote === null
+                              ? 'quoting...'
+                              : minimumOut !== null
+                                ? `min ${formatTokenValue(minimumOut, tokenOut, 6)}`
+                                : ''}
+                          </i>
                         </div>
+                        <div className="dex-swap-panel__main">
+                          <input
+                            readOnly
+                            value={currentQuote === null ? '' : formatUnits(currentQuote, tokenOut?.decimals ?? 18, 8)}
+                            placeholder={currentQuoteLoading && currentQuote === null ? 'Reading...' : '0.00'}
+                            aria-label={`Estimated ${tokenSymbol(tokenOut)} received`}
+                            onFocus={(event) => event.currentTarget.blur()}
+                          />
+                          <button type="button" className="dex-token-pill" onClick={() => setTokenSelect('out')} aria-label={`Change the receive token, currently ${tokenSymbol(tokenOut)}`}>
+                            <TokenBadge token={tokenOut} />
+                            <strong>{tokenSymbol(tokenOut)}</strong>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+                          </button>
+                        </div>
+                        <small className="dex-swap-panel__sub">
+                          {currentQuoteError ?? (currentQuote === null ? 'Enter an amount to fetch the live pool quote.' : 'Live SpotPool quote at 1e18 precision.')}
+                        </small>
+                      </div>
+
+                      {swapRateValue !== EMPTY && (
+                        <button type="button" className="dex-rate" onClick={() => setRateInverted((value) => !value)} aria-label="Toggle rate direction">
+                          <span>1 {tokenSymbol(swapRateBase)} =</span>
+                          <strong>{swapRateValue}</strong>
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg>
+                        </button>
+                      )}
+
+                      <details className="dex-swap-details">
+                        <summary>
+                          Swap details
+                          <span>{slippage}% max slippage</span>
+                        </summary>
                         <dl>
-                          <div><dt>Minimum received</dt><dd>{formatTokenValue(minimumOut, tokenOut, 6)}</dd></div>
-                          <div><dt>LP fee</dt><dd>{formatFeePpm(pool?.feePpm ?? null)}</dd></div>
-                          <div><dt>Slippage</dt><dd>{slippage}%</dd></div>
+                          <div><dt>Minimum received</dt><dd>{formatTokenValue(minimumOut, tokenOut, 6)} {tokenSymbol(tokenOut)}</dd></div>
+                          <div><dt>Liquidity fee</dt><dd>{formatFeePpm(pool?.feePpm ?? null)}</dd></div>
+                          <div><dt>Max slippage</dt><dd>{slippage}%</dd></div>
+                          <div><dt>Route</dt><dd><code>{shortenAddress(pool.address)}</code></dd></div>
+                          <div><dt>Network</dt><dd>Monad chain 143</dd></div>
                         </dl>
-                      </div>
-                      <div className="dex-trade-settings">
-                        <label htmlFor="dex-slippage">Slippage</label>
-                        <select id="dex-slippage" value={slippage} onChange={(event) => setSlippage(event.target.value)}>
-                          <option value="0.1">0.1%</option>
-                          <option value="0.5">0.5%</option>
-                          <option value="1">1%</option>
-                          <option value="2">2%</option>
-                        </select>
-                        <span>{wallet.address ? (walletToken?.allowance == null ? 'Allowance read pending' : approvalRequired ? 'Approval required' : 'Allowance ready') : 'Connect to approve ERC20'}</span>
-                      </div>
+                      </details>
 
                       <div className="dex-action-block">
-                        <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!actionReady || walletBusy}>
-                          {tradeButtonLabel} <span aria-hidden="true">-&gt;</span>
+                        <button className="dex-button dex-button--gold dex-button--full dex-cta" type="submit" disabled={walletBusy || !swapCtaReady}>
+                          {tradeButtonLabel}
                         </button>
-                        <p className="dex-trade-note">Swaps are simulated against the live allowance and balance before signing. SpotPool writes use ERC20 <code>approve</code> then <code>swapExactIn</code>; native MON must be wrapped first.</p>
+                        <p className="dex-trade-note">Every swap is dry-run against the live allowance and balance before signing. Native MON must be wrapped first; this terminal trades ERC20 pairs only.</p>
                       </div>
                     </>
                   ))}

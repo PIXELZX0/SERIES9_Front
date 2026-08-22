@@ -269,10 +269,10 @@ a:focus-visible {
   width: 31px;
   height: 31px;
   place-items: center;
-  border: 1px solid var(--gold);
-  color: var(--gold-bright);
-  font-size: 9px;
-  letter-spacing: .03em;
+}
+
+.brand__mark svg {
+  display: block;
 }
 
 .brand__name {

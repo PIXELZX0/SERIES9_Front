@@ -691,6 +691,25 @@ function ButtonArrow() {
   return <Icon name="arrow" size={16} />;
 }
 
+function BrandMark() {
+  return (
+    <span className="brand__mark" aria-hidden="true">
+      <svg viewBox="0 0 64 64" width={31} height={31} focusable="false">
+        <rect width="64" height="64" rx="14" fill="#0a0a09" />
+        <circle cx="32" cy="32" r="23" fill="none" stroke="#c9a45d" strokeWidth="2" />
+        <path
+          d="M40.4 19.5c-2.6-1.7-5.7-2.7-9-2.7-9 0-16.2 6.8-16.2 15.2s7.2 15.2 16.2 15.2c3.4 0 6.5-1 9.1-2.7"
+          fill="none"
+          stroke="#e8c46a"
+          strokeWidth="4"
+          strokeLinecap="round"
+        />
+        <path d="M23 24.4h16.8M23 39.6h16.8" fill="none" stroke="#f4f0e6" strokeWidth="3" strokeLinecap="round" />
+      </svg>
+    </span>
+  );
+}
+
 function FeatureCard({ feature, ser9Image }: { feature: Feature; ser9Image: string | null }) {
   const workspaceRoutes: Record<Feature['id'], SiteRoute> = {
     identity: '/identity',
@@ -1770,7 +1789,7 @@ function App() {
       <header className="site-header">
         <div className="site-header__inner container">
           <a className="brand" href={routeHref('/', '#overview')} onClick={handleNavClick} aria-label="SERIES9 home">
-            <span className="brand__mark">S9</span>
+                        <BrandMark />
             <span className="brand__name">SERIES9</span>
           </a>
 
@@ -2919,7 +2938,7 @@ function App() {
       <footer className="site-footer">
         <div className="container site-footer__inner">
           <a className="brand brand--footer" href={routeHref('/', '#overview')} onClick={handleNavClick} aria-label="SERIES9 home">
-            <span className="brand__mark">S9</span>
+                        <BrandMark />
             <span className="brand__name">SERIES9</span>
           </a>
           <p>Identity in motion.</p>

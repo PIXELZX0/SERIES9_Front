@@ -109,6 +109,14 @@
   color: var(--ink);
 }
 
+.dx-poolbar--empty {
+  justify-content: flex-end;
+}
+
+.dx-poolbar--empty > .dx-dot {
+  display: none;
+}
+
 .dx-poolbar__address {
   overflow: hidden;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -318,7 +326,6 @@ summary:focus-visible {
   position: relative;
   width: 100%;
   min-width: 0;
-  max-width: 492px;
   justify-self: center;
   border: 1px solid var(--line-dark);
   border-radius: 0;
@@ -1557,84 +1564,6 @@ summary:focus-visible {
   line-height: 1.55;
 }
 
-/* ── contracts footer ─────────────────────────────────────────────────────── */
-
-.dx-contracts {
-  display: grid;
-  gap: 12px;
-  width: 100%;
-  margin-top: 14px;
-}
-
-.dx-contracts__grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.dx-contract {
-  display: grid;
-  min-width: 0;
-  gap: 5px;
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: 0;
-  background: var(--paper-light);
-  color: var(--ink);
-}
-
-.dx-contract > div {
-  display: grid;
-  gap: 2px;
-}
-
-.dx-contract strong {
-  font-size: 12.5px;
-  font-weight: 750;
-}
-
-.dx-contract small {
-  color: var(--ink-muted);
-  font-size: 10px;
-  line-height: 1.4;
-}
-
-.dx-contract code {
-  overflow: hidden;
-  color: var(--ink-muted);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 10.5px;
-  letter-spacing: .03em;
-}
-
-.dx-contract a {
-  color: var(--gold-ink);
-  font-size: 10.5px;
-  font-weight: 700;
-  transition: color 140ms var(--ease-out);
-}
-
-.dx-contract a:hover {
-  color: var(--gold-bright);
-}
-
-.dx-contracts .dx-subhead > span {
-  color: var(--ink-muted);
-}
-
-.dx-s9pos {
-  margin: 2px 2px 0;
-  color: var(--ink-muted);
-  font-size: 11px;
-  line-height: 1.55;
-}
-
-.dx-s9pos strong {
-  margin-right: 6px;
-  color: var(--gold-ink);
-  letter-spacing: .1em;
-}
-
 /* ── modals ───────────────────────────────────────────────────────────────── */
 
 .dx-modal-layer {
@@ -1954,9 +1883,6 @@ summary:focus-visible {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .dx-contracts__grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 600px) {
@@ -1999,8 +1925,7 @@ summary:focus-visible {
     height: 36px;
   }
 
-  .dx-fee-picker,
-  .dx-contracts__grid {
+  .dx-fee-picker {
     grid-template-columns: 1fr;
   }
 

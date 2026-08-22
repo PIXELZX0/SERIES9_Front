@@ -30,7 +30,6 @@ import {
   SELECTOR,
   decodeString,
   ethCall,
-  explorerAddressUrl,
   formatUnits,
   normalizeTokenImageUri,
   rpcBatch,
@@ -928,19 +927,6 @@ function MetricCard({ label, value, note }: { label: string; value: string; note
       <strong>{value}</strong>
       {note && <small>{note}</small>}
     </div>
-  );
-}
-
-function ContractChip({ name, address, note }: { name: string; address: string; note?: string }) {
-  return (
-    <article className="dx-contract">
-      <div>
-        <strong>{name}</strong>
-        {note && <small>{note}</small>}
-      </div>
-      <code>{shortenAddress(address)}</code>
-      <a href={explorerAddressUrl(address)} target="_blank" rel="noreferrer">Explorer ↗</a>
-    </article>
   );
 }
 
@@ -1955,18 +1941,20 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           </p>
         </header>
 
-        <div className="dx-poolbar">
-          <span className={`dx-dot${poolVerified ? ' dx-dot--ok' : ''}`} aria-hidden="true" />
-          <code className="dx-poolbar__address">
-            {activePoolAddress ? shortenAddress(activePoolAddress) : 'NO POOL LOADED'}
-          </code>
-          <span className="dx-poolbar__note">
-            {poolVerified
-              ? `verified · ${formatFeePpm(pool?.feePpm ?? null)} LP fee`
-              : activePoolAddress
-                ? 'not verified'
-                : 'load a pool to trade'}
-          </span>
+        <div
+          className={`dx-poolbar${activePoolAddress ? '' : ' dx-poolbar--empty'}`}
+          role="group"
+          aria-label="Pool controls"
+        >
+          {activePoolAddress && (
+            <>
+              <span className={`dx-dot${poolVerified ? ' dx-dot--ok' : ''}`} aria-hidden="true" />
+              <code className="dx-poolbar__address">{shortenAddress(activePoolAddress)}</code>
+              <span className="dx-poolbar__note">
+                {poolVerified ? `verified · ${formatFeePpm(pool?.feePpm ?? null)} LP fee` : 'not verified'}
+              </span>
+            </>
+          )}
           <div className="dx-poolbar__tools">
             <button
               type="button"
@@ -2505,23 +2493,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           )}
         </section>
 
-        <section className="dx-contracts" aria-labelledby="dex-contracts-title">
-          <div className="dx-subhead">
-            <h3 id="dex-contracts-title">Core contracts</h3>
-            <span>Monad mainnet deployments</span>
-          </div>
-          <div className="dx-contracts__grid">
-            <ContractChip name="DexRegistry" address={DEX_CONTRACTS.registry} note={dex.registryWiring.status === 'healthy' ? 'wiring confirmed' : 'wiring check visible above'} />
-            <ContractChip name="ProtocolTreasury" address={DEX_CONTRACTS.protocolTreasury} note="protocol fee sink" />
-            <ContractChip name="Orderbook" address={DEX_CONTRACTS.orderbook} note={dex.registryWiring.infraRegistry.orderbook ? `registry ${shortenAddress(dex.registryWiring.infraRegistry.orderbook)}` : 'registry read pending'} />
-            <ContractChip name="SpotPoolFactory" address={DEX_CONTRACTS.spotPoolFactory} note="pool deployment" />
-            <ContractChip name="PerpPoolFactory" address={DEX_CONTRACTS.perpPoolFactory} note="perpetual deployment" />
-            <ContractChip name="DexPositionManager" address={DEX_CONTRACTS.positionManager} note={dex.positionManager.symbol ? `${dex.positionManager.symbol} / next #${dex.positionManager.nextTokenId?.toString() ?? EMPTY}` : 'position NFT metadata pending'} />
-          </div>
-          <p className="dx-s9pos">
-            <strong>S9-POS</strong> DexPositionManager custodies LP shares as an ERC-721 wrapper. It is not the swap target — approvals go to the selected SpotPool only.
-          </p>
-        </section>
       </div>
 
       {tokenSelect !== null && pool?.valid && pool.token0 !== null && pool.token1 !== null && (

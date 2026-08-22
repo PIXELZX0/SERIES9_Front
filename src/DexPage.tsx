@@ -18,6 +18,7 @@ import {
 import { computePairId } from './keccak.ts';
 import { explorerAddressUrl, formatUnits, shortenAddress } from './chain.ts';
 import { useDex, type DexOpenOrder, type DexPoolSnapshot, type DexToken } from './useDex.ts';
+import { dexHref, useDexSection, type DexTab } from './useDexRoute.ts';
 import type { WalletState } from './useWallet.ts';
 
 type NotificationKind = 'success' | 'error';
@@ -48,8 +49,6 @@ type DexOperationProgress = {
   hash: string | null;
   unresolved: boolean;
 };
-
-type DexTab = 'swap' | 'liquidity' | 'orders' | 'create';
 
 type OrderSide = 'buy' | 'sell';
 
@@ -550,7 +549,7 @@ function GearIcon() {
 function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [poolAddressInput, setPoolAddressInput] = useState(DEX_CONFIG.spotPoolAddress ?? '');
   const [activePoolAddress, setActivePoolAddress] = useState<string | null>(DEX_CONFIG.spotPoolAddress);
-  const [tab, setTab] = useState<DexTab>('swap');
+  const [tab, setTab] = useDexSection();
   const [direction, setDirection] = useState<'token0' | 'token1'>('token0');
   const [amountIn, setAmountIn] = useState('');
   const [slippage, setSlippage] = useState('0.5');
@@ -1567,28 +1566,29 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
               </div>
             </div>
 
-            <div className="dex-tabs dex-tabs--four" role="tablist" aria-label="DEX actions">
+            <nav className="dex-tabs dex-tabs--four" aria-label="DEX pages">
               {([
                 ['swap', 'Swap', 'exact input'],
                 ['liquidity', 'Liquidity', 'add / remove'],
                 ['orders', 'Orders', 'limit book'],
                 ['create', 'Create pool', 'registry write'],
               ] as Array<[DexTab, string, string]>).map(([value, label, note]) => (
-                <button
+                <a
                   key={value}
                   className={`dex-tab${tab === value ? ' dex-tab--active' : ''}`}
-                  type="button"
-                  role="tab"
+                  href={dexHref(value)}
                   id={`dex-tab-${value}`}
-                  aria-selected={tab === value}
-                  aria-controls={`dex-panel-${value}`}
-                  onClick={() => setTab(value)}
+                  aria-current={tab === value ? 'page' : undefined}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    setTab(value);
+                  }}
                 >
                   <strong>{label}</strong>
                   <small>{note}</small>
-                </button>
+                </a>
               ))}
-            </div>
+            </nav>
 
             <div className="dex-terminal__body">
               <div className="dex-pool-strip">
@@ -1655,7 +1655,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   {finder.pairId && <p className="dex-finder__pair">PAIR ID <code>{`${finder.pairId.slice(0, 14)}...${finder.pairId.slice(-6)}`}</code></p>}
                   {finder.error && <p className="dex-finder__error">{finder.error}</p>}
                   {finder.status === 'done' && finder.pools.length === 0 && (
-                    <p className="dex-finder__empty">The registry holds no SpotPool for this pair yet. Create one from the third tab.</p>
+                    <p className="dex-finder__empty">The registry holds no SpotPool for this pair yet. Create one on the Create pool page.</p>
                   )}
                   {finder.pools.map((address) => (
                     <button
@@ -1675,8 +1675,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 <form
                   className="dex-tabpanel dex-swap-form"
                   id="dex-panel-swap"
-                  role="tabpanel"
-                  aria-labelledby="dex-tab-swap"
                   onSubmit={handleSwap}
                 >
                   {emptyState ? (
@@ -1684,7 +1682,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                       <span className="dex-empty__mark">09</span>
                       <span className="panel-kicker">NO POOL LOADED</span>
                       <h3>Factories are live. The pair is yours to point at.</h3>
-                      <p>The Monad deployment wires the registry, treasury, factories, orderbook, and S9-POS. Load a pool above, or create one on the third tab.</p>
+                      <p>The Monad deployment wires the registry, treasury, factories, orderbook, and S9-POS. Load a pool above, or create one on the Create pool page.</p>
                     </div>
                   ) : poolGate ?? (!pool?.hasLiquidity ? (
                     <div className="dex-pool-gate">
@@ -1811,13 +1809,13 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
               )}
 
               {tab === 'liquidity' && (
-                <div className="dex-tabpanel" id="dex-panel-liquidity" role="tabpanel" aria-labelledby="dex-tab-liquidity">
+                <div className="dex-tabpanel" id="dex-panel-liquidity">
                   {emptyState ? (
                     <div className="dex-empty">
                       <span className="dex-empty__mark">09</span>
                       <span className="panel-kicker">NO POOL LOADED</span>
                       <h3>Point at a pool before you fund it.</h3>
-                      <p>Load a SpotPool above, or create one on the next tab and it will be selected for you automatically.</p>
+                      <p>Load a SpotPool above, or create one on the Create pool page and it will be selected for you automatically.</p>
                     </div>
                   ) : poolGate ?? (
                     <>
@@ -1945,7 +1943,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
               )}
 
               {tab === 'orders' && (
-                <div className="dex-tabpanel" id="dex-panel-orders" role="tabpanel" aria-labelledby="dex-tab-orders">
+                <div className="dex-tabpanel" id="dex-panel-orders">
                   {emptyState ? (
                     <div className="dex-empty">
                       <span className="dex-empty__mark">09</span>
@@ -2106,8 +2104,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 <form
                   className="dex-tabpanel"
                   id="dex-panel-create"
-                  role="tabpanel"
-                  aria-labelledby="dex-tab-create"
                   onSubmit={handleCreatePool}
                 >
                   <h3 className="dex-subhead">Create a SpotPool</h3>

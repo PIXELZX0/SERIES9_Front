@@ -5154,6 +5154,7 @@ a:focus-visible {
   background: transparent;
   color: rgba(244, 240, 230, .5);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   transition: color 180ms var(--ease-out), border-color 180ms var(--ease-out), background-color 180ms var(--ease-out);
 }

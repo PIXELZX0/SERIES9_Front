@@ -406,7 +406,7 @@ function currentPage(pathname = window.location.pathname): Page {
   if (normalizedPath === '/identity') return 'identity';
   if (normalizedPath === '/staking') return 'staking';
   if (normalizedPath === '/tokenomics') return 'tokenomics';
-  if (normalizedPath === '/dex') return 'dex';
+  if (normalizedPath === '/dex' || normalizedPath.startsWith('/dex/')) return 'dex';
   if (normalizedPath === '/moderator') return 'moderator';
   return 'home';
 }

@@ -464,6 +464,15 @@ function RefreshIcon() {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <line x1="16" y1="16" x2="21" y2="21" />
+    </svg>
+  );
+}
+
 function ChevronDownIcon({ size = 11 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1037,11 +1046,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     slippageBps !== null &&
     walletReadReady &&
     !insufficientBalance;
-  const networkState = dex.error || dex.registryWiring.status === 'degraded'
-    ? 'degraded'
-    : dex.loading || dex.registryWiring.status === 'unavailable'
-      ? 'loading'
-      : 'live';
   const visibleDexError = dex.error !== null && dex.error !== dismissedDexError ? dex.error : null;
   const pageError = actionError ?? visibleDexError ?? currentQuoteError;
   const currentWalletKey = wallet.address ? walletAddressKey(wallet.address) : null;
@@ -1929,48 +1933,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
   return (
     <section className="workspace-section workspace-section--dex" aria-labelledby="dex-page-title">
+      <h1 id="dex-page-title" className="dx-visually-hidden">SERIES9 DEX</h1>
       <div className="dx-shell">
-        <header className="dx-hero">
-          <p className="dx-hero__eyebrow">
-            <span className={`dx-dot${networkState === 'live' ? ' dx-dot--ok' : ''}`} aria-hidden="true" />
-            SERIES9 DEX · MONAD CHAIN 143
-          </p>
-          <h1 id="dex-page-title">Trade<em> in gold.</em></h1>
-          <p className="dx-hero__note">
-            Every write is simulated against live chain state before your wallet signs.
-          </p>
-        </header>
-
-        <div
-          className={`dx-poolbar${activePoolAddress ? '' : ' dx-poolbar--empty'}`}
-          role="group"
-          aria-label="Pool controls"
-        >
-          {activePoolAddress && (
-            <>
-              <span className={`dx-dot${poolVerified ? ' dx-dot--ok' : ''}`} aria-hidden="true" />
-              <code className="dx-poolbar__address">{shortenAddress(activePoolAddress)}</code>
-              <span className="dx-poolbar__note">
-                {poolVerified ? `verified · ${formatFeePpm(pool?.feePpm ?? null)} LP fee` : 'not verified'}
-              </span>
-            </>
-          )}
-          <div className="dx-poolbar__tools">
-            <button
-              type="button"
-              className="dx-icon-button"
-              onClick={dex.refresh}
-              disabled={dex.loading}
-              aria-label="Refresh chain reads"
-            >
-              <RefreshIcon />
-            </button>
-            <button type="button" className="dx-button dx-button--ghost dx-button--small" onClick={() => setFinderOpen(true)}>
-              Change pool
-            </button>
-          </div>
-        </div>
-
         {pageError && (
           <div className="dx-alert" role="alert">
             <span>{pageError}</span>
@@ -1999,8 +1963,28 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             <div className="dx-head-tools">
               <button
                 type="button"
+                className="dx-icon-button"
+                aria-label="Find or change pool"
+                title="Find or change pool"
+                onClick={() => setFinderOpen(true)}
+              >
+                <SearchIcon />
+              </button>
+              <button
+                type="button"
+                className="dx-icon-button"
+                aria-label="Refresh chain reads"
+                title="Refresh chain reads"
+                onClick={dex.refresh}
+                disabled={dex.loading}
+              >
+                <RefreshIcon />
+              </button>
+              <button
+                type="button"
                 className={`dx-icon-button${settingsOpen ? ' dx-icon-button--open' : ''}`}
                 aria-label="Swap settings"
+                title="Swap settings"
                 aria-expanded={settingsOpen}
                 onClick={() => setSettingsOpen((open) => !open)}
               >
@@ -2473,25 +2457,18 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           )}
         </section>
 
-        <section className="dx-stats" aria-label="Live pool readings">
-          {pool?.valid && registryReady ? (
-            <>
-              <MetricCard label="RESERVE 0" value={formatTokenValue(pool.reserves?.reserve0 ?? null, pool.token0)} note={tokenSymbol(pool.token0)} />
-              <MetricCard label="RESERVE 1" value={formatTokenValue(pool.reserves?.reserve1 ?? null, pool.token1)} note={tokenSymbol(pool.token1)} />
-              <MetricCard label="SPOT PRICE" value={formatPriceX18(pool.spotPriceX18 ?? pool.reservePriceX18, pool.token0, pool.token1)} note="token1 per token0" />
-              <MetricCard label="LP FEE" value={formatFeePpm(pool.feePpm)} note="fixed at creation" />
-              <MetricCard label="TOTAL SHARES" value={pool.totalShares === null ? EMPTY : pool.totalShares.toString()} note="LP supply" />
-              <MetricCard label="BEST BID" value={formatLevelPrice(dex.orderbook?.bestBid?.priceX18 ?? null, pool)} note={`${formatTokenValue(dex.orderbook?.bestBid?.totalBase ?? null, pool.token0)} ${tokenSymbol(pool.token0)}`} />
-              <MetricCard label="BEST ASK" value={formatLevelPrice(dex.orderbook?.bestAsk?.priceX18 ?? null, pool)} note={`${formatTokenValue(dex.orderbook?.bestAsk?.totalBase ?? null, pool.token0)} ${tokenSymbol(pool.token0)}`} />
-              <MetricCard label="BOOK" value={dex.orderbook?.bookConfig?.initialized ? 'INITIALIZED' : dex.orderbook?.bookConfig ? 'EMPTY' : 'UNAVAILABLE'} note={dex.orderbook?.bookConfig?.tickSize === undefined ? 'config undecoded' : `tick ${dex.orderbook?.bookConfig?.tickSize.toString() ?? EMPTY}`} />
-            </>
-          ) : (
-            <div className="dx-stats__quiet">
-              <span>POOL TELEMETRY</span>
-              <p>Live readings appear once a verified SpotPool, token metadata, pair ID, and reserve tuple are read from Monad.</p>
-            </div>
-          )}
-        </section>
+        {pool?.valid && registryReady && (
+          <section className="dx-stats" aria-label="Live pool readings">
+            <MetricCard label="RESERVE 0" value={formatTokenValue(pool.reserves?.reserve0 ?? null, pool.token0)} note={tokenSymbol(pool.token0)} />
+            <MetricCard label="RESERVE 1" value={formatTokenValue(pool.reserves?.reserve1 ?? null, pool.token1)} note={tokenSymbol(pool.token1)} />
+            <MetricCard label="SPOT PRICE" value={formatPriceX18(pool.spotPriceX18 ?? pool.reservePriceX18, pool.token0, pool.token1)} note="token1 per token0" />
+            <MetricCard label="LP FEE" value={formatFeePpm(pool.feePpm)} note="fixed at creation" />
+            <MetricCard label="TOTAL SHARES" value={pool.totalShares === null ? EMPTY : pool.totalShares.toString()} note="LP supply" />
+            <MetricCard label="BEST BID" value={formatLevelPrice(dex.orderbook?.bestBid?.priceX18 ?? null, pool)} note={`${formatTokenValue(dex.orderbook?.bestBid?.totalBase ?? null, pool.token0)} ${tokenSymbol(pool.token0)}`} />
+            <MetricCard label="BEST ASK" value={formatLevelPrice(dex.orderbook?.bestAsk?.priceX18 ?? null, pool)} note={`${formatTokenValue(dex.orderbook?.bestAsk?.totalBase ?? null, pool.token0)} ${tokenSymbol(pool.token0)}`} />
+            <MetricCard label="BOOK" value={dex.orderbook?.bookConfig?.initialized ? 'INITIALIZED' : dex.orderbook?.bookConfig ? 'EMPTY' : 'UNAVAILABLE'} note={dex.orderbook?.bookConfig?.tickSize === undefined ? 'config undecoded' : `tick ${dex.orderbook?.bookConfig?.tickSize.toString() ?? EMPTY}`} />
+          </section>
+        )}
 
       </div>
 

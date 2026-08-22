@@ -20,13 +20,22 @@ import {
   encodeIsSpotPool,
   encodeOrderbookPairRead,
   encodePoolPairId,
+  encodeSharesOf,
   normalizeDexAddress,
+  readOrderWindow,
+  type DecodedOrder,
   readSpotQuote as readDexSpotQuote,
   simulateSwapExactIn as simulateDexSwapExactIn,
 } from './dex.ts';
 import { rpcBatch } from './chain.ts';
 
 export type DexRegistryStatus = 'healthy' | 'degraded' | 'unavailable';
+
+/**
+ * How far back to walk `Orderbook.orders`. Ids are global across every pair, so
+ * this bounds one wallet's open-order lookup to a single RPC batch.
+ */
+const ORDER_SCAN_LIMIT = 150;
 
 export type DexToken = {
   address: string;
@@ -54,6 +63,7 @@ export type DexPoolSnapshot = {
   feePpm: bigint | null;
   spotPriceX18: bigint | null;
   reservePriceX18: bigint | null;
+  totalShares: bigint | null;
   valid: boolean;
   hasLiquidity: boolean;
   error: string | null;
@@ -105,13 +115,22 @@ export type DexPositionManagerSnapshot = {
 export type DexWalletToken = {
   address: string;
   balance: bigint | null;
+  /** Spender is the SpotPool: swaps and deposits pull from here. */
   allowance: bigint | null;
+  /** Spender is the shared Orderbook: limit orders escrow from here. */
+  orderbookAllowance: bigint | null;
+};
+
+export type DexOpenOrder = {
+  id: bigint;
+  order: DecodedOrder;
 };
 
 export type DexWalletSnapshot = {
   address: string;
   token0: DexWalletToken | null;
   token1: DexWalletToken | null;
+  shares: bigint | null;
 };
 
 export type DexState = {
@@ -122,6 +141,8 @@ export type DexState = {
   orderbook: DexOrderbookSnapshot | null;
   positionManager: DexPositionManagerSnapshot;
   walletTokens: DexWalletSnapshot | null;
+  nextOrderId: bigint | null;
+  myOrders: DexOpenOrder[];
 };
 
 type ReadAddress = ReturnType<typeof decodeDexAddressRead>;
@@ -166,6 +187,8 @@ function createEmptyDexState(): DexState {
     orderbook: null,
     positionManager: { name: null, symbol: null, nextTokenId: null },
     walletTokens: null,
+    nextOrderId: null,
+    myOrders: [],
   };
 }
 
@@ -253,6 +276,7 @@ function buildInvalidPool(address: string): DexPoolSnapshot {
     feePpm: null,
     spotPriceX18: null,
     reservePriceX18: null,
+    totalShares: null,
     valid: false,
     hasLiquidity: false,
     error: 'Enter a valid 20-byte SpotPool address.',
@@ -277,6 +301,7 @@ async function readDexState(
     dexCall(DEX_CONTRACTS.positionManager, encodeDexNoArgs(DEX_SELECTOR.positionManagerName)),
     dexCall(DEX_CONTRACTS.positionManager, encodeDexNoArgs(DEX_SELECTOR.positionManagerSymbol)),
     dexCall(DEX_CONTRACTS.positionManager, encodeDexNoArgs(DEX_SELECTOR.nextTokenId)),
+    dexCall(DEX_CONTRACTS.orderbook, encodeDexNoArgs(DEX_SELECTOR.nextOrderId)),
   ], signal);
 
   const registryReads = {
@@ -313,6 +338,7 @@ async function readDexState(
     symbol: decodeDexString(infraResults[10]),
     nextTokenId: decodeDexUint(infraResults[11]),
   };
+  const nextOrderId = decodeDexUint(infraResults[12]);
 
   const rawPoolAddress = selectedPoolAddress?.trim() ?? '';
   const poolAddress = normalizeDexAddress(selectedPoolAddress);
@@ -325,6 +351,8 @@ async function readDexState(
       orderbook: null,
       positionManager,
       walletTokens: null,
+      nextOrderId,
+      myOrders: [],
     };
   }
 
@@ -340,6 +368,7 @@ async function readDexState(
     dexCall(poolAddress, encodeDexNoArgs(DEX_SELECTOR.registry)),
     dexCall(poolAddress, encodeDexNoArgs(DEX_SELECTOR.orderbook)),
     dexCall(poolAddress, encodeDexNoArgs(DEX_SELECTOR.treasury)),
+    dexCall(poolAddress, encodeDexNoArgs(DEX_SELECTOR.totalShares)),
   ], signal);
 
   const isSpotPool = decodeDexBool(poolResults[0]);
@@ -354,6 +383,7 @@ async function readDexState(
   const poolRegistryRead = decodeDexAddressRead(poolResults[8]);
   const poolOrderbookRead = decodeDexAddressRead(poolResults[9]);
   const poolTreasuryRead = decodeDexAddressRead(poolResults[10]);
+  const totalShares = decodeDexUint(poolResults[11]);
   const pairIdConsistent = registryPairId !== null && poolPairId !== null
     ? registryPairId.toLowerCase() === poolPairId.toLowerCase()
     : null;
@@ -361,7 +391,7 @@ async function readDexState(
 
   const extraCalls = [] as ReturnType<typeof dexCall>[];
   const tokenIndexes: Array<ExtraIndexes | null> = [null, null];
-  const walletIndexes: Array<{ balance: number; allowance: number } | null> = [null, null];
+  const walletIndexes: Array<{ balance: number; allowance: number; orderbookAllowance: number } | null> = [null, null];
   const wallet = normalizeDexAddress(walletAddress);
 
   [token0Read.address, token1Read.address].forEach((tokenAddress, index) => {
@@ -379,16 +409,21 @@ async function readDexState(
     if (wallet) {
       const balance = extraCalls.length;
       const allowance = extraCalls.length + 1;
+      const orderbookAllowance = extraCalls.length + 2;
       extraCalls.push(
         dexCall(tokenAddress, encodeErc20BalanceOf(wallet)),
         dexCall(tokenAddress, encodeErc20Allowance(wallet, poolAddress)),
+        dexCall(tokenAddress, encodeErc20Allowance(wallet, DEX_CONTRACTS.orderbook)),
       );
       indexes.balance = balance;
       indexes.allowance = allowance;
-      walletIndexes[index] = { balance, allowance };
+      walletIndexes[index] = { balance, allowance, orderbookAllowance };
     }
     tokenIndexes[index] = indexes;
   });
+
+  const walletSharesIndex = wallet ? extraCalls.length : null;
+  if (wallet) extraCalls.push(dexCall(poolAddress, encodeSharesOf(wallet)));
 
   const orderbookIndexes = pairId && pairIdVerified
     ? {
@@ -426,6 +461,7 @@ async function readDexState(
               address: token0Read.address,
               balance: decodeDexUint(extraResults[walletIndexes[0].balance]),
               allowance: decodeDexUint(extraResults[walletIndexes[0].allowance]),
+              orderbookAllowance: decodeDexUint(extraResults[walletIndexes[0].orderbookAllowance]),
             }
           : null,
         token1: token1Read.address && walletIndexes[1]
@@ -433,8 +469,10 @@ async function readDexState(
               address: token1Read.address,
               balance: decodeDexUint(extraResults[walletIndexes[1].balance]),
               allowance: decodeDexUint(extraResults[walletIndexes[1].allowance]),
+              orderbookAllowance: decodeDexUint(extraResults[walletIndexes[1].orderbookAllowance]),
             }
           : null,
+        shares: walletSharesIndex === null ? null : decodeDexUint(extraResults[walletSharesIndex]),
       }
     : null;
 
@@ -446,6 +484,12 @@ async function readDexState(
         bookConfig: decodeDexBookConfig(extraResults[orderbookIndexes.bookConfig]),
       }
     : null;
+
+  const myOrders = wallet !== null && pairId !== null && pairIdVerified && nextOrderId !== null
+    ? (await readOrderWindow(nextOrderId, ORDER_SCAN_LIMIT, signal)).filter(({ order }) =>
+        order.maker.toLowerCase() === wallet.toLowerCase() &&
+        order.pairId.toLowerCase() === pairId.toLowerCase())
+    : [];
 
   const tokenMetadataReady = tokens[0] !== null &&
     tokens[1] !== null &&
@@ -511,6 +555,7 @@ async function readDexState(
       feePpm,
       spotPriceX18,
       reservePriceX18,
+      totalShares,
       valid,
       hasLiquidity,
       error: poolError,
@@ -518,6 +563,8 @@ async function readDexState(
     orderbook,
     positionManager,
     walletTokens,
+    nextOrderId,
+    myOrders,
   };
 }
 

@@ -1,13 +1,23 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import {
   DEX_CONFIG,
   DEX_CONTRACTS,
+  DEX_ORDER_SIDE,
+  DEX_ORDER_STATUS,
+  encodeAddLiquidity,
+  encodeCancelOrder,
+  encodeCreateSpotPool,
   encodeErc20Approve,
+  encodePlaceOrder,
+  encodeRemoveLiquidity,
   encodeSwapExactIn,
   normalizeDexAddress,
+  readSpotPoolsForPair,
+  simulateDexWrite,
 } from './dex.ts';
+import { computePairId } from './keccak.ts';
 import { explorerAddressUrl, formatUnits, shortenAddress } from './chain.ts';
-import { useDex, type DexPoolSnapshot, type DexToken } from './useDex.ts';
+import { useDex, type DexOpenOrder, type DexPoolSnapshot, type DexToken } from './useDex.ts';
 import type { WalletState } from './useWallet.ts';
 
 type NotificationKind = 'success' | 'error';
@@ -31,8 +41,23 @@ type DexOperation = {
   label: string;
   walletAddress: string | null;
   walletKey: string | null;
+};
+
+/** Mutable half of the in-flight operation, held in a ref so it is never React state. */
+type DexOperationProgress = {
   hash: string | null;
   unresolved: boolean;
+};
+
+type DexTab = 'swap' | 'liquidity' | 'orders' | 'create';
+
+type OrderSide = 'buy' | 'sell';
+
+type PoolFinderState = {
+  status: 'idle' | 'loading' | 'done' | 'error';
+  pairId: string | null;
+  pools: string[];
+  error: string | null;
 };
 
 const EMPTY = '--';
@@ -40,6 +65,25 @@ const UINT256_LIMIT = 2n ** 256n;
 const UNRESOLVED_TRANSACTION_STORAGE_KEY = 'series9:unresolved-submitted-transactions';
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+const IDLE_POOL_FINDER: PoolFinderState = { status: 'idle', pairId: null, pools: [], error: null };
+
+/** Presets mirror the registry's parts-per-million fee scale: 10_000 ppm = 1%. */
+const FEE_PRESETS: Array<{ ppm: string; label: string; note: string }> = [
+  { ppm: '500', label: '0.05%', note: 'stable pairs' },
+  { ppm: '3000', label: '0.30%', note: 'standard' },
+  { ppm: '10000', label: '1.00%', note: 'volatile' },
+];
+
+const REMOVE_PERCENTS = [25, 50, 75, 100] as const;
+
+const EXPIRY_PRESETS: Array<{ seconds: string; label: string }> = [
+  { seconds: '3600', label: '1 hour' },
+  { seconds: '86400', label: '1 day' },
+  { seconds: '604800', label: '7 days' },
+  { seconds: '2592000', label: '30 days' },
+];
+
+const PRICE_X18_EXPONENT = 18;
 
 function walletAddressKey(address: string): string {
   return address.toLowerCase();
@@ -217,6 +261,53 @@ function parseSlippageBps(value: string): number | null {
   return Number.isSafeInteger(basisPoints) && basisPoints >= 0 && basisPoints <= 5_000 ? basisPoints : null;
 }
 
+/** Whole-number field used for the registry's uint256 tick size. */
+function parseWholeUint(value: string): bigint | null {
+  const normalized = value.trim().replace(/,/g, '');
+  if (!/^\d+$/.test(normalized)) return null;
+  try {
+    const parsed = BigInt(normalized);
+    return parsed < UINT256_LIMIT ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The book prices in raw quote per raw base, scaled by 1e18, so a human price
+ * needs the decimal gap between the two tokens folded in before parsing.
+ */
+function parsePriceToX18(value: string, baseDecimals: number | null, quoteDecimals: number | null): bigint | null {
+  if (baseDecimals === null || quoteDecimals === null) return null;
+  const scale = PRICE_X18_EXPONENT + quoteDecimals - baseDecimals;
+  if (scale < 0 || scale > 77) return null;
+  return parseTokenAmount(value, scale);
+}
+
+/** Buy orders escrow quote, sell orders escrow base. */
+function orderEscrow(side: OrderSide, priceX18: bigint, amount: bigint): bigint {
+  return side === 'buy' ? priceX18 * amount / 10n ** 18n : amount;
+}
+
+function formatExpiry(expiry: bigint): string {
+  const milliseconds = Number(expiry) * 1000;
+  if (!Number.isFinite(milliseconds)) return EMPTY;
+  return new Date(milliseconds).toLocaleString();
+}
+
+function orderStatusLabel(entry: DexOpenOrder, nowSeconds: number): string {
+  const { order } = entry;
+  if (order.status === DEX_ORDER_STATUS.cancelled) return 'CANCELLED';
+  if (order.status === DEX_ORDER_STATUS.filled) return 'FILLED';
+  if (order.amount > 0n && order.filled >= order.amount) return 'FILLED';
+  if (nowSeconds > 0 && order.expiry <= BigInt(nowSeconds)) return 'EXPIRED';
+  return order.filled > 0n ? 'PARTIAL' : 'OPEN';
+}
+
+function applySlippageFloor(amount: bigint, basisPoints: number): bigint {
+  return amount * BigInt(10_000 - basisPoints) / 10_000n;
+}
+
 function formatHash(hash: string): string {
   return `${hash.slice(0, 10)}...${hash.slice(-6)}`;
 }
@@ -277,6 +368,7 @@ function PoolMetric({ label, value, note }: { label: string; value: string; note
 function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [poolAddressInput, setPoolAddressInput] = useState(DEX_CONFIG.spotPoolAddress ?? '');
   const [activePoolAddress, setActivePoolAddress] = useState<string | null>(DEX_CONFIG.spotPoolAddress);
+  const [tab, setTab] = useState<DexTab>('swap');
   const [direction, setDirection] = useState<'token0' | 'token1'>('token0');
   const [amountIn, setAmountIn] = useState('');
   const [slippage, setSlippage] = useState('0.5');
@@ -289,20 +381,47 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [unresolvedTransactions, setUnresolvedTransactions] = useState<DexUnresolvedTransactions>(readDexUnresolvedTransactions);
   const [currentOperationWalletKey, setCurrentOperationWalletKey] = useState<string | null>(null);
+
+  const [finderTokenA, setFinderTokenA] = useState('');
+  const [finderTokenB, setFinderTokenB] = useState('');
+  const [finder, setFinder] = useState<PoolFinderState>(IDLE_POOL_FINDER);
+
+  const [addAmount0, setAddAmount0] = useState('');
+  const [addAmount1, setAddAmount1] = useState('');
+  const [liquiditySlippage, setLiquiditySlippage] = useState('1');
+  const [removePercent, setRemovePercent] = useState<number>(50);
+
+  const [orderSide, setOrderSide] = useState<OrderSide>('buy');
+  const [orderPrice, setOrderPrice] = useState('');
+  const [orderAmount, setOrderAmount] = useState('');
+  const [orderExpiry, setOrderExpiry] = useState('86400');
+  /** Wall clock kept in state so render stays pure; refreshed once a minute. */
+  const [nowSeconds, setNowSeconds] = useState(0);
+
+  const [createTokenA, setCreateTokenA] = useState('');
+  const [createTokenB, setCreateTokenB] = useState('');
+  const [createFeePpm, setCreateFeePpm] = useState('3000');
+  const [createTickSize, setCreateTickSize] = useState('1');
+
   const writeInFlightRef = useRef(false);
   const writeLockWalletRef = useRef<string | null>(null);
   const operationSequenceRef = useRef(0);
   const currentOperationRef = useRef<DexOperation | null>(null);
+  const operationProgressRef = useRef<DexOperationProgress>({ hash: null, unresolved: false });
   const mountedRef = useRef(true);
 
   const dex = useDex(activePoolAddress, wallet.address);
   const { readSpotQuote } = dex;
   const pool = dex.pool;
   const registryReady = dex.registryWiring.status === 'healthy';
-  const poolReady = pool?.valid === true && pool.hasLiquidity && registryReady;
+  const poolVerified = pool?.valid === true && registryReady;
+  const poolReady = poolVerified && pool !== null && pool.hasLiquidity;
   const tokenIn = pool && direction === 'token0' ? pool.token0 : pool?.token1 ?? null;
   const tokenOut = pool && direction === 'token0' ? pool.token1 : pool?.token0 ?? null;
   const walletToken = direction === 'token0' ? dex.walletTokens?.token0 ?? null : dex.walletTokens?.token1 ?? null;
+  const walletToken0 = dex.walletTokens?.token0 ?? null;
+  const walletToken1 = dex.walletTokens?.token1 ?? null;
+  const walletShares = dex.walletTokens?.shares ?? null;
   const inputAmount = parseTokenAmount(amountIn, tokenIn?.decimals ?? null);
   const quotePoolKey = pool?.reserves === null || pool?.reserves === undefined
     ? ''
@@ -314,7 +433,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const currentQuoteLoading = poolReady && inputAmount !== null && (quoteIsCurrent ? quoteLoading : true);
   const slippageBps = parseSlippageBps(slippage);
   const minimumOut = currentQuote !== null && slippageBps !== null
-    ? currentQuote * BigInt(10_000 - slippageBps) / 10_000n
+    ? applySlippageFloor(currentQuote, slippageBps)
     : null;
   const onchainAllowance = walletToken?.allowance ?? null;
   const approvalRequired = inputAmount !== null && (onchainAllowance === null || inputAmount > onchainAllowance);
@@ -352,11 +471,100 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     ? unresolvedTransactions[currentWalletKey] ?? operationWalletTransaction ?? firstStoredTransaction
     : operationWalletTransaction ?? firstStoredTransaction;
 
+  // ── liquidity ────────────────────────────────────────────────────────────────
+  const liquiditySlippageBps = parseSlippageBps(liquiditySlippage);
+  const amount0In = parseTokenAmount(addAmount0, pool?.token0?.decimals ?? null);
+  const amount1In = parseTokenAmount(addAmount1, pool?.token1?.decimals ?? null);
+  const poolRatioReady = pool?.reserves != null && pool.reserves.reserve0 > 0n && pool.reserves.reserve1 > 0n;
+  const approvalRequired0 = amount0In !== null && (walletToken0?.allowance == null || amount0In > walletToken0.allowance);
+  const approvalRequired1 = amount1In !== null && (walletToken1?.allowance == null || amount1In > walletToken1.allowance);
+  const insufficient0 = amount0In !== null && walletToken0?.balance != null && amount0In > walletToken0.balance;
+  const insufficient1 = amount1In !== null && walletToken1?.balance != null && amount1In > walletToken1.balance;
+  const addLiquidityReady = poolVerified &&
+    amount0In !== null &&
+    amount1In !== null &&
+    liquiditySlippageBps !== null &&
+    !insufficient0 &&
+    !insufficient1;
+  const removeShares = walletShares === null || walletShares === 0n
+    ? null
+    : walletShares * BigInt(removePercent) / 100n;
+  const shareOfPoolPpm = walletShares !== null && pool?.totalShares != null && pool.totalShares > 0n
+    ? walletShares * 1_000_000n / pool.totalShares
+    : null;
+  const redeemable = useMemo(() => {
+    if (removeShares === null || removeShares === 0n) return null;
+    if (pool?.reserves == null || pool.totalShares == null || pool.totalShares === 0n) return null;
+    return {
+      amount0: pool.reserves.reserve0 * removeShares / pool.totalShares,
+      amount1: pool.reserves.reserve1 * removeShares / pool.totalShares,
+    };
+  }, [pool?.reserves, pool?.totalShares, removeShares]);
+
+  // ── limit orders ─────────────────────────────────────────────────────────────
+  const baseToken = pool?.token0 ?? null;
+  const quoteToken = pool?.token1 ?? null;
+  const orderPriceX18 = parsePriceToX18(orderPrice, baseToken?.decimals ?? null, quoteToken?.decimals ?? null);
+  const orderAmountRaw = parseTokenAmount(orderAmount, baseToken?.decimals ?? null);
+  const orderEscrowAmount = orderPriceX18 !== null && orderAmountRaw !== null
+    ? orderEscrow(orderSide, orderPriceX18, orderAmountRaw)
+    : null;
+  const escrowToken = orderSide === 'buy' ? quoteToken : baseToken;
+  const orderQuoteValue = orderPriceX18 !== null && orderAmountRaw !== null
+    ? orderPriceX18 * orderAmountRaw / 10n ** 18n
+    : null;
+  const proceedsToken = orderSide === 'buy' ? baseToken : quoteToken;
+  const orderProceeds = orderSide === 'buy' ? orderAmountRaw : orderQuoteValue;
+  const escrowWalletToken = orderSide === 'buy' ? walletToken1 : walletToken0;
+  const escrowApprovalRequired = orderEscrowAmount !== null &&
+    (escrowWalletToken?.orderbookAllowance == null || orderEscrowAmount > escrowWalletToken.orderbookAllowance);
+  const escrowShort = orderEscrowAmount !== null &&
+    escrowWalletToken?.balance != null &&
+    orderEscrowAmount > escrowWalletToken.balance;
+  const bookInitialized = dex.orderbook?.bookConfig?.initialized === true;
+  const orderReady = poolVerified &&
+    bookInitialized &&
+    orderPriceX18 !== null &&
+    orderPriceX18 > 0n &&
+    orderAmountRaw !== null &&
+    orderEscrowAmount !== null &&
+    orderEscrowAmount > 0n &&
+    !escrowShort &&
+    nowSeconds > 0;
+  const expirySeconds = parseWholeUint(orderExpiry);
+  const orderExpiryAt = nowSeconds > 0 && expirySeconds !== null ? BigInt(nowSeconds) + expirySeconds : null;
+  const openOrders = dex.myOrders.filter((entry) => ['OPEN', 'PARTIAL'].includes(orderStatusLabel(entry, nowSeconds)));
+  const closedOrders = dex.myOrders.filter((entry) => !openOrders.includes(entry));
+
+  // ── create ───────────────────────────────────────────────────────────────────
+  const createTokenAAddress = normalizeDexAddress(createTokenA);
+  const createTokenBAddress = normalizeDexAddress(createTokenB);
+  const createPairId = createTokenAAddress && createTokenBAddress
+    ? computePairId(createTokenAAddress, createTokenBAddress)
+    : null;
+  const createFee = parseWholeUint(createFeePpm);
+  const createTick = parseWholeUint(createTickSize);
+  const createFeeWithinLimit = createFee !== null &&
+    (dex.registryWiring.maxLpFeeRatePpm === null || createFee <= dex.registryWiring.maxLpFeeRatePpm);
+  const createReady = registryReady &&
+    createPairId !== null &&
+    createFee !== null &&
+    createFeeWithinLimit &&
+    createTick !== null &&
+    createTick > 0n;
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const tick = () => setNowSeconds(Math.floor(Date.now() / 1000));
+    tick();
+    const timerId = globalThis.setInterval(tick, 60_000);
+    return () => globalThis.clearInterval(timerId);
   }, []);
 
   useEffect(() => {
@@ -413,9 +621,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       label,
       walletAddress: wallet.address,
       walletKey: wallet.address ? walletAddressKey(wallet.address) : null,
-      hash: null,
-      unresolved: false,
     };
+    operationProgressRef.current = { hash: null, unresolved: false };
     operationSequenceRef.current = operation.token;
     currentOperationRef.current = operation;
     setCurrentOperationWalletKey(operation.walletKey);
@@ -425,13 +632,23 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   }
 
   function finishOperation(operation: DexOperation) {
-    if (!isCurrentOperation(operation) || operation.unresolved) return;
+    if (!isCurrentOperation(operation) || operationProgressRef.current.unresolved) return;
     if (mountedRef.current) setBusyAction(null);
     onActionState(null);
     writeInFlightRef.current = false;
     writeLockWalletRef.current = null;
     currentOperationRef.current = null;
     setCurrentOperationWalletKey(null);
+  }
+
+  function selectPool(nextAddress: string) {
+    setPoolAddressInput(nextAddress);
+    setActivePoolAddress(normalizeDexAddress(nextAddress) ?? nextAddress);
+    setActionError(null);
+    setQuote(null);
+    setAmountIn('');
+    setAddAmount0('');
+    setAddAmount1('');
   }
 
   function handleLoadPool() {
@@ -449,6 +666,41 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     setActionError(null);
     setQuoteError(null);
     if (dex.error !== null) setDismissedDexError(dex.error);
+  }
+
+  async function handleFindPools(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const tokenA = normalizeDexAddress(finderTokenA);
+    const tokenB = normalizeDexAddress(finderTokenB);
+    if (!tokenA || !tokenB) {
+      setFinder({ status: 'error', pairId: null, pools: [], error: 'Both fields need a valid 20-byte token address.' });
+      return;
+    }
+
+    const pairId = computePairId(tokenA, tokenB);
+    if (pairId === null) {
+      setFinder({ status: 'error', pairId: null, pools: [], error: 'A pair needs two different tokens.' });
+      return;
+    }
+
+    setFinder({ status: 'loading', pairId, pools: [], error: null });
+    try {
+      const pools = await readSpotPoolsForPair(pairId);
+      if (!mountedRef.current) return;
+      if (pools === null) {
+        setFinder({ status: 'error', pairId, pools: [], error: 'The registry did not return a readable pool list.' });
+        return;
+      }
+      setFinder({ status: 'done', pairId, pools, error: null });
+    } catch (findError: unknown) {
+      if (!mountedRef.current) return;
+      setFinder({
+        status: 'error',
+        pairId,
+        pools: [],
+        error: findError instanceof Error ? findError.message : 'The registry lookup failed.',
+      });
+    }
   }
 
   async function ensureMonadWallet(): Promise<boolean> {
@@ -472,6 +724,19 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       return false;
     }
 
+    return true;
+  }
+
+  /** Guard shared by every write entry point: one wallet action at a time, no unresolved receipt. */
+  function canStartWrite(): boolean {
+    if (unresolvedTransaction !== null) {
+      notifyError(`Transaction ${formatHash(unresolvedTransaction.hash)} is unresolved. Verify it before sending another DEX action.`);
+      return false;
+    }
+    if (writeInFlightRef.current || currentOperationRef.current !== null) {
+      notifyError('Another DEX wallet action is already in progress.');
+      return false;
+    }
     return true;
   }
 
@@ -502,7 +767,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     try {
       const submittedHash = await wallet.sendTransaction(request);
       if (!isCurrentOperation(operation)) return false;
-      operation.hash = submittedHash;
+      operationProgressRef.current.hash = submittedHash;
       if (submittedWalletAddress !== null && submittedWalletKey !== null) {
         const nextUnresolvedTransaction = {
           hash: submittedHash,
@@ -510,7 +775,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           walletAddress: submittedWalletAddress,
         };
         persistDexUnresolvedTransaction(nextUnresolvedTransaction);
-        operation.unresolved = true;
+        operationProgressRef.current.unresolved = true;
         if (mountedRef.current) {
           setUnresolvedTransactions((transactions) => {
             if (!isCurrentOperation(operation) || !mountedRef.current) return transactions;
@@ -543,7 +808,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             return nextTransactions;
           });
         }
-        operation.unresolved = false;
+        operationProgressRef.current.unresolved = false;
       }
       onNotify(`${label} confirmed. DEX readings will refresh.`);
       if (mountedRef.current) dex.refresh();
@@ -551,9 +816,9 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     } catch (error: unknown) {
       if (!isCurrentOperation(operation)) return false;
       const message = error instanceof Error ? error.message : `${label} failed.`;
-      const submittedHash = operation.hash;
+      const submittedHash = operationProgressRef.current.hash;
       if (submittedHash !== null && submittedWalletAddress !== null && message !== 'Transaction was mined but reverted on Monad.') {
-        operation.unresolved = true;
+        operationProgressRef.current.unresolved = true;
         const unresolvedRecord = {
           hash: submittedHash,
           label,
@@ -587,27 +852,52 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             return nextTransactions;
           });
         }
-        operation.unresolved = false;
+        operationProgressRef.current.unresolved = false;
         notifyError(message);
       } else {
         notifyError(message);
       }
       return false;
     } finally {
-      if (isCurrentOperation(operation) && !operation.unresolved) finishOperation(operation);
+      if (isCurrentOperation(operation) && !operationProgressRef.current.unresolved) finishOperation(operation);
     }
+  }
+
+  /**
+   * Dry-run the calldata with the connected wallet as `from`, then sign it. Every
+   * write on this page goes through here so a revert is reported before a wallet
+   * prompt instead of after a failed transaction.
+   */
+  async function simulateThenSend(
+    label: string,
+    request: { to: string; data: string },
+    onSimulated?: (returnData: string) => void,
+  ): Promise<boolean> {
+    if (!canStartWrite()) return false;
+    if (!(await ensureMonadWallet())) return false;
+    const sender = wallet.address;
+    if (!sender) return false;
+
+    const operation = beginOperation(label);
+    setActionError(null);
+    updateBusyAction(operation, `${label} / simulating`);
+    updateActionState(operation, `${label} / simulating live execution`);
+
+    const simulation = await simulateDexWrite(sender, request.to, request.data);
+    if (!isCurrentOperation(operation)) return false;
+    if (!simulation.ok) {
+      notifyError(`${label} would revert. ${simulation.error ?? 'The pre-flight simulation failed.'}`);
+      finishOperation(operation);
+      return false;
+    }
+    if (simulation.returnData !== null) onSimulated?.(simulation.returnData);
+
+    return sendDexTransaction(label, request, operation);
   }
 
   async function handleSwap(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (unresolvedTransaction !== null) {
-      notifyError(`Transaction ${formatHash(unresolvedTransaction.hash)} is unresolved. Verify it before sending another DEX action.`);
-      return;
-    }
-    if (writeInFlightRef.current || currentOperationRef.current !== null) {
-      notifyError('Another DEX wallet action is already in progress.');
-      return;
-    }
+    if (!canStartWrite()) return;
     if (!poolReady || pool === null || tokenIn === null || tokenOut === null) {
       notifyError('Load a verified SpotPool with nonzero reserves before trading.');
       return;
@@ -654,7 +944,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
         throw new Error('Final swap simulation returned zero output. No swap was signed.');
       }
 
-      const simulatedMinimumOut = simulatedOutput * BigInt(10_000 - slippageBps) / 10_000n;
+      const simulatedMinimumOut = applySlippageFloor(simulatedOutput, slippageBps);
       if (simulatedMinimumOut === 0n) {
         throw new Error('Final swap output is too small for the selected slippage. No zero-minimum swap will be signed.');
       }
@@ -674,6 +964,203 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     }
   }
 
+  async function handleAddLiquidity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canStartWrite()) return;
+    if (!poolVerified || pool === null || pool.token0 === null || pool.token1 === null) {
+      notifyError('Load a registry-verified SpotPool before adding liquidity.');
+      return;
+    }
+    if (amount0In === null || amount1In === null || liquiditySlippageBps === null) {
+      notifyError('Enter both deposit amounts within the token precision.');
+      return;
+    }
+    if (insufficient0 || insufficient1) {
+      notifyError('The connected wallet does not hold enough of one of the pair tokens.');
+      return;
+    }
+    if (!(await ensureMonadWallet())) return;
+    const recipient = wallet.address;
+    if (!recipient) return;
+
+    if (approvalRequired0) {
+      const approved = await sendDexTransaction(`Approve ${tokenSymbol(pool.token0)}`, {
+        to: pool.token0.address,
+        data: encodeErc20Approve(pool.address, amount0In),
+      });
+      if (approved) onNotify(`${tokenSymbol(pool.token0)} approved. Approve the second token next.`);
+      return;
+    }
+    if (approvalRequired1) {
+      const approved = await sendDexTransaction(`Approve ${tokenSymbol(pool.token1)}`, {
+        to: pool.token1.address,
+        data: encodeErc20Approve(pool.address, amount1In),
+      });
+      if (approved) onNotify(`${tokenSymbol(pool.token1)} approved. Deposit is ready to sign.`);
+      return;
+    }
+
+    const amount0Min = applySlippageFloor(amount0In, liquiditySlippageBps);
+    const amount1Min = applySlippageFloor(amount1In, liquiditySlippageBps);
+    if (amount0Min === 0n || amount1Min === 0n) {
+      notifyError('The slippage floor rounds one side to zero. Increase the deposit or tighten the tolerance.');
+      return;
+    }
+
+    const added = await simulateThenSend(
+      `Add liquidity to ${shortenAddress(pool.address)}`,
+      { to: pool.address, data: encodeAddLiquidity(amount0In, amount1In, amount0Min, amount1Min, recipient) },
+    );
+    if (added) {
+      setAddAmount0('');
+      setAddAmount1('');
+    }
+  }
+
+  async function handleRemoveLiquidity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canStartWrite()) return;
+    if (!poolVerified || pool === null) {
+      notifyError('Load a registry-verified SpotPool before withdrawing.');
+      return;
+    }
+    if (removeShares === null || removeShares === 0n) {
+      notifyError('This wallet holds no LP shares in the loaded pool.');
+      return;
+    }
+    if (!(await ensureMonadWallet())) return;
+    const recipient = wallet.address;
+    if (!recipient) return;
+
+    const bps = liquiditySlippageBps ?? 100;
+    const amount0Min = redeemable ? applySlippageFloor(redeemable.amount0, bps) : 1n;
+    const amount1Min = redeemable ? applySlippageFloor(redeemable.amount1, bps) : 1n;
+
+    await simulateThenSend(
+      `Remove ${removePercent}% of liquidity`,
+      {
+        to: pool.address,
+        data: encodeRemoveLiquidity(removeShares, amount0Min > 0n ? amount0Min : 1n, amount1Min > 0n ? amount1Min : 1n, recipient),
+      },
+    );
+  }
+
+  async function handlePlaceOrder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canStartWrite()) return;
+    if (!poolVerified || pool === null || pool.pairId === null) {
+      notifyError('Load a registry-verified SpotPool before placing an order.');
+      return;
+    }
+    if (!bookInitialized) {
+      notifyError('The Orderbook has no initialised book for this pair.');
+      return;
+    }
+    if (orderPriceX18 === null || orderPriceX18 === 0n || orderAmountRaw === null || orderEscrowAmount === null || orderEscrowAmount === 0n) {
+      notifyError('Enter a limit price and an amount within the token precision.');
+      return;
+    }
+    if (escrowShort || escrowToken === null) {
+      notifyError(`The connected wallet does not hold enough ${tokenSymbol(escrowToken)} to escrow this order.`);
+      return;
+    }
+    if (!(await ensureMonadWallet())) return;
+
+    if (escrowApprovalRequired) {
+      const approved = await sendDexTransaction(`Approve ${tokenSymbol(escrowToken)} for the Orderbook`, {
+        to: escrowToken.address,
+        data: encodeErc20Approve(DEX_CONTRACTS.orderbook, orderEscrowAmount),
+      });
+      if (approved) onNotify(`${tokenSymbol(escrowToken)} approved for the Orderbook. Sign the order next.`);
+      return;
+    }
+
+    if (orderExpiryAt === null) {
+      notifyError('Pick how long the order should stay on the book.');
+      return;
+    }
+
+    const placed = await simulateThenSend(
+      `Place ${orderSide} order`,
+      {
+        to: DEX_CONTRACTS.orderbook,
+        data: encodePlaceOrder(
+          pool.pairId,
+          orderSide === 'buy' ? DEX_ORDER_SIDE.buy : DEX_ORDER_SIDE.sell,
+          orderPriceX18,
+          orderAmountRaw,
+          orderExpiryAt,
+        ),
+      },
+    );
+    if (placed) {
+      setOrderAmount('');
+      onNotify(`${orderSide === 'buy' ? 'Bid' : 'Ask'} resting on the book. It fills when a swap crosses it.`);
+    }
+  }
+
+  async function handleCancelOrder(event: MouseEvent<HTMLButtonElement>) {
+    const raw = event.currentTarget.dataset.orderId ?? '';
+    const orderId = parseWholeUint(raw);
+    if (orderId === null || orderId === 0n) return;
+    if (!canStartWrite()) return;
+    if (!(await ensureMonadWallet())) return;
+    await simulateThenSend(`Cancel order #${orderId.toString()}`, {
+      to: DEX_CONTRACTS.orderbook,
+      data: encodeCancelOrder(orderId),
+    });
+  }
+
+  async function handleCreatePool(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canStartWrite()) return;
+    if (!registryReady) {
+      notifyError('Pool creation stays locked until the registry wiring reads as healthy.');
+      return;
+    }
+    if (createTokenAAddress === null || createTokenBAddress === null) {
+      notifyError('Both token fields need a valid 20-byte address.');
+      return;
+    }
+    if (createPairId === null) {
+      notifyError('A pair needs two different tokens.');
+      return;
+    }
+    if (createFee === null || !createFeeWithinLimit) {
+      notifyError(`The LP fee must be a whole ppm value at or below ${formatPpmLimit(dex.registryWiring.maxLpFeeRatePpm)}.`);
+      return;
+    }
+    if (createTick === null || createTick === 0n) {
+      notifyError('The tick size must be a whole number greater than zero.');
+      return;
+    }
+
+    let createdPoolAddress: string | null = null;
+    const created = await simulateThenSend(
+      'Create SpotPool',
+      {
+        to: DEX_CONTRACTS.registry,
+        data: encodeCreateSpotPool(createTokenAAddress, createTokenBAddress, createFee, createTick),
+      },
+      (returnData) => {
+        const candidate = `0x${returnData.slice(-40)}`;
+        createdPoolAddress = normalizeDexAddress(candidate);
+      },
+    );
+
+    if (created) {
+      if (createdPoolAddress) {
+        selectPool(createdPoolAddress);
+        setTab('liquidity');
+        onNotify(`Pool ${shortenAddress(createdPoolAddress)} created. Seed it with liquidity to enable swaps.`);
+      } else {
+        onNotify('Pool created. Look it up with the pair finder to load it.');
+      }
+      setFinderTokenA(createTokenAAddress);
+      setFinderTokenB(createTokenBAddress);
+    }
+  }
+
   function handleAcknowledgeUnresolvedTransaction() {
     if (unresolvedTransaction === null) return;
 
@@ -681,8 +1168,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     const currentOperation = currentOperationRef.current;
     const acknowledgesCurrentOperation = currentOperation !== null &&
       currentOperation.walletKey === acknowledgedKey &&
-      currentOperation.hash !== null &&
-      sameTransactionHash(currentOperation.hash, unresolvedTransaction.hash);
+      operationProgressRef.current.hash !== null &&
+      sameTransactionHash(operationProgressRef.current.hash, unresolvedTransaction.hash);
 
     if (!clearDexUnresolvedTransaction(unresolvedTransaction.walletAddress, unresolvedTransaction.hash)) {
       const reloadedTransactions = reloadDexUnresolvedTransactions();
@@ -714,8 +1201,32 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     }
   }
 
+  /** Mirror a deposit across the live reserve ratio so the pool takes both sides whole. */
+  function handleMatchRatio(side: 'token0' | 'token1') {
+    if (!poolRatioReady || pool?.reserves == null || pool.token0 == null || pool.token1 == null) return;
+    const { reserve0, reserve1 } = pool.reserves;
+
+    if (side === 'token0') {
+      if (amount0In === null || pool.token1.decimals === null) return;
+      setAddAmount1(formatUnits(amount0In * reserve1 / reserve0, pool.token1.decimals, pool.token1.decimals));
+      return;
+    }
+    if (amount1In === null || pool.token0.decimals === null) return;
+    setAddAmount0(formatUnits(amount1In * reserve0 / reserve1, pool.token0.decimals, pool.token0.decimals));
+  }
+
+  function handleMaxDeposit(side: 'token0' | 'token1') {
+    const target = side === 'token0' ? walletToken0 : walletToken1;
+    const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
+    if (target?.balance == null || token?.decimals == null) return;
+    const formatted = formatUnits(target.balance, token.decimals, token.decimals);
+    if (side === 'token0') setAddAmount0(formatted);
+    else setAddAmount1(formatted);
+  }
+
   const emptyState = activePoolAddress === null;
   const statusLabel = networkState === 'live' ? 'ONCHAIN / LIVE' : networkState === 'loading' ? 'ONCHAIN / READING' : 'ONCHAIN / DEGRADED';
+  const walletBusy = busyAction !== null || wallet.connecting || wallet.switching || unresolvedTransaction !== null;
   const tradeButtonLabel = busyAction ?? (
     !wallet.address
       ? 'Connect wallet'
@@ -725,6 +1236,50 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           ? `Approve ${tokenSymbol(tokenIn)}`
           : `Swap ${tokenSymbol(tokenIn)} -> ${tokenSymbol(tokenOut)}`
   );
+  const addLiquidityButtonLabel = busyAction ?? (
+    !wallet.address
+      ? 'Connect wallet'
+      : !wallet.onMonad
+        ? 'Switch to Monad'
+        : approvalRequired0
+          ? `Approve ${tokenSymbol(pool?.token0 ?? null)}`
+          : approvalRequired1
+            ? `Approve ${tokenSymbol(pool?.token1 ?? null)}`
+            : pool?.hasLiquidity
+              ? 'Add liquidity'
+              : 'Seed the first position'
+  );
+  const orderButtonLabel = busyAction ?? (
+    !wallet.address
+      ? 'Connect wallet'
+      : !wallet.onMonad
+        ? 'Switch to Monad'
+        : escrowApprovalRequired
+          ? `Approve ${tokenSymbol(escrowToken)}`
+          : orderSide === 'buy'
+            ? `Place bid for ${tokenSymbol(baseToken)}`
+            : `Place ask for ${tokenSymbol(baseToken)}`
+  );
+  const createButtonLabel = busyAction ?? (
+    !wallet.address ? 'Connect wallet' : !wallet.onMonad ? 'Switch to Monad' : 'Create SpotPool'
+  );
+
+  const poolGate = pool?.invalidAddress ? (
+    <div className="dex-pool-gate dex-pool-gate--error">
+      <strong>Address format rejected.</strong>
+      <p>{pool.error}</p>
+    </div>
+  ) : !registryReady ? (
+    <div className="dex-pool-gate dex-pool-gate--error">
+      <strong>Registry wiring is not verified.</strong>
+      <p>Write controls stay hidden until the configured registry, pool, Orderbook, and treasury addresses agree on-chain.</p>
+    </div>
+  ) : !pool?.valid ? (
+    <div className="dex-pool-gate">
+      <strong>{pool?.error ?? 'Reading the selected pool.'}</strong>
+      <p>Write controls stay hidden until DexRegistry confirms the pool and reserves return as a valid tuple.</p>
+    </div>
+  ) : null;
 
   return (
     <section className="workspace-section workspace-section--dex" aria-labelledby="dex-page-title">
@@ -735,7 +1290,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             <h1 id="dex-page-title">Trade the signal<br /><em>with receipts.</em></h1>
           </div>
           <div className="dex-heading__aside">
-            <p>Read the deployed registry, inspect a SpotPool, and sign only when its tokens and reserves are verifiable.</p>
+            <p>Create a pool, seed it, and swap against it. Every write is dry-run against the live chain before your wallet is asked to sign.</p>
             <div className={`dex-onchain-status dex-onchain-status--${networkState}`} role="status">
               <span />
               <strong>{statusLabel}</strong>
@@ -763,17 +1318,40 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           <section className="dex-terminal" aria-labelledby="dex-terminal-title">
             <div className="dex-terminal__header">
               <div>
-                <span className="panel-kicker">SPOT / EXACT INPUT</span>
-                <h2 id="dex-terminal-title">Swap terminal</h2>
+                <span className="panel-kicker">SPOT / ONCHAIN WRITES</span>
+                <h2 id="dex-terminal-title">Trading terminal</h2>
               </div>
               <span className={`dex-terminal__state${poolReady ? ' dex-terminal__state--ready' : ''}`}>
-                {poolReady ? 'READY' : pool?.valid && !registryReady ? 'VERIFY WIRING' : pool?.valid ? 'NO LIQUIDITY' : 'POOL REQUIRED'}
+                {poolReady ? 'READY' : poolVerified ? 'NO LIQUIDITY' : pool?.valid ? 'VERIFY WIRING' : 'POOL REQUIRED'}
               </span>
             </div>
 
-            <form className="dex-terminal__body" onSubmit={handleSwap}>
+            <div className="dex-tabs dex-tabs--four" role="tablist" aria-label="DEX actions">
+              {([
+                ['swap', 'Swap', 'exact input'],
+                ['liquidity', 'Liquidity', 'add / remove'],
+                ['orders', 'Orders', 'limit book'],
+                ['create', 'Create pool', 'registry write'],
+              ] as Array<[DexTab, string, string]>).map(([value, label, note]) => (
+                <button
+                  key={value}
+                  className={`dex-tab${tab === value ? ' dex-tab--active' : ''}`}
+                  type="button"
+                  role="tab"
+                  id={`dex-tab-${value}`}
+                  aria-selected={tab === value}
+                  aria-controls={`dex-panel-${value}`}
+                  onClick={() => setTab(value)}
+                >
+                  <strong>{label}</strong>
+                  <small>{note}</small>
+                </button>
+              ))}
+            </div>
+
+            <div className="dex-terminal__body">
               <div className="dex-pool-loader">
-                <label htmlFor="dex-pool-address">SpotPool address</label>
+                <label htmlFor="dex-pool-address">Active SpotPool</label>
                 <div className="dex-pool-loader__row">
                   <input
                     id="dex-pool-address"
@@ -792,115 +1370,549 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 </div>
                 <small>
                   {DEX_CONFIG.spotPoolAddress
-                    ? 'Loaded from VITE_DEX_SPOT_POOL_ADDRESS. Paste another deployed pool to inspect it.'
-                    : 'No pool is seeded by deployment. Paste a deployed SpotPool address or configure VITE_DEX_SPOT_POOL_ADDRESS.'}
+                    ? 'Seeded from VITE_DEX_SPOT_POOL_ADDRESS. Paste another deployed pool, or find one by token pair below.'
+                    : 'No pool is seeded by deployment. Paste an address, find one by token pair, or create a pool.'}
                 </small>
               </div>
 
-              {emptyState ? (
-                <div className="dex-empty">
-                  <span className="dex-empty__mark">09</span>
-                  <span className="panel-kicker">NO SEEDED SPOT PAIR</span>
-                  <h3>Factories are live. The pair is yours to point at.</h3>
-                  <p>The Monad deployment wires the registry, treasury, factories, orderbook, and S9-POS. It does not create or seed a SpotPool. Supply <code>VITE_DEX_SPOT_POOL_ADDRESS</code> or paste a deployed pool above.</p>
-                </div>
-              ) : pool?.invalidAddress ? (
-                <div className="dex-pool-gate dex-pool-gate--error">
-                  <strong>Address format rejected.</strong>
-                  <p>{pool.error}</p>
-                </div>
-              ) : !registryReady ? (
-                <div className="dex-pool-gate dex-pool-gate--error">
-                  <strong>Registry wiring is not verified.</strong>
-                  <p>Swap controls stay hidden until the configured registry, pool, Orderbook, and treasury addresses agree on-chain.</p>
-                </div>
-              ) : !pool?.valid ? (
-                <div className="dex-pool-gate">
-                  <strong>{pool?.error ?? 'Reading the selected pool.'}</strong>
-                  <p>Swap controls stay hidden until DexRegistry confirms the pool and reserves return as a valid tuple.</p>
-                </div>
-              ) : !pool.hasLiquidity ? (
-                <div className="dex-pool-gate">
-                  <strong>Pool found, waiting for liquidity.</strong>
-                  <p>Both reserve fields must be nonzero before this terminal will expose approval or swap actions.</p>
-                </div>
-              ) : (
-                <>
-                  <div className="dex-token-pair">
-                    <div className="dex-token-box">
-                      <span>YOU SEND</span>
-                      <strong>{tokenSymbol(tokenIn)}</strong>
-                      <code>{tokenIn ? shortenAddress(tokenIn.address) : EMPTY}</code>
-                    </div>
+              <details className="dex-finder" open={emptyState}>
+                <summary>Find a pool by token pair</summary>
+                <form className="dex-finder__form" onSubmit={handleFindPools}>
+                  <label>
+                    <span>Token A</span>
+                    <input
+                      value={finderTokenA}
+                      onChange={(event) => setFinderTokenA(event.target.value)}
+                      placeholder="0x..."
+                      spellCheck="false"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label>
+                    <span>Token B</span>
+                    <input
+                      value={finderTokenB}
+                      onChange={(event) => setFinderTokenB(event.target.value)}
+                      placeholder="0x..."
+                      spellCheck="false"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <button className="dex-button dex-button--outline" type="submit" disabled={finder.status === 'loading'}>
+                    {finder.status === 'loading' ? 'Reading registry...' : 'Search registry'}
+                  </button>
+                </form>
+                <div className="dex-finder__results" aria-live="polite">
+                  {finder.pairId && <p className="dex-finder__pair">PAIR ID <code>{`${finder.pairId.slice(0, 14)}...${finder.pairId.slice(-6)}`}</code></p>}
+                  {finder.error && <p className="dex-finder__error">{finder.error}</p>}
+                  {finder.status === 'done' && finder.pools.length === 0 && (
+                    <p className="dex-finder__empty">The registry holds no SpotPool for this pair yet. Create one from the third tab.</p>
+                  )}
+                  {finder.pools.map((address) => (
                     <button
-                      className="dex-direction-toggle"
+                      key={address}
+                      className={`dex-finder__pool${normalizeDexAddress(activePoolAddress)?.toLowerCase() === address.toLowerCase() ? ' dex-finder__pool--active' : ''}`}
                       type="button"
-                      aria-label="Reverse token direction"
-                      onClick={() => setDirection((current) => current === 'token0' ? 'token1' : 'token0')}
+                      onClick={() => selectPool(address)}
                     >
-                      <span aria-hidden="true">&lt;-&gt;</span>
+                      <code>{shortenAddress(address)}</code>
+                      <span>Load pool <span aria-hidden="true">-&gt;</span></span>
                     </button>
-                    <div className="dex-token-box dex-token-box--receive">
-                      <span>YOU RECEIVE</span>
-                      <strong>{tokenSymbol(tokenOut)}</strong>
-                      <code>{tokenOut ? shortenAddress(tokenOut.address) : EMPTY}</code>
-                    </div>
-                  </div>
+                  ))}
+                </div>
+              </details>
 
-                  <label className="dex-amount-field" htmlFor="dex-amount-in">
-                    <span><b>Amount in</b><i>Balance {wallet.address ? formatTokenValue(walletToken?.balance ?? null, tokenIn) : 'connect wallet'}</i></span>
-                    <div>
-                      <input
-                        id="dex-amount-in"
-                        value={amountIn}
-                        onChange={(event) => {
-                          setAmountIn(event.target.value);
-                          setActionError(null);
-                        }}
-                        placeholder="0.00"
-                        inputMode="decimal"
-                        autoComplete="off"
-                        aria-describedby="dex-amount-note"
-                      />
-                      <strong>{tokenSymbol(tokenIn)}</strong>
-                      <button type="button" onClick={handleMaxAmount} disabled={walletToken?.balance === null || walletToken === null}>MAX</button>
+              {tab === 'swap' && (
+                <form
+                  className="dex-tabpanel"
+                  id="dex-panel-swap"
+                  role="tabpanel"
+                  aria-labelledby="dex-tab-swap"
+                  onSubmit={handleSwap}
+                >
+                  {emptyState ? (
+                    <div className="dex-empty">
+                      <span className="dex-empty__mark">09</span>
+                      <span className="panel-kicker">NO POOL LOADED</span>
+                      <h3>Factories are live. The pair is yours to point at.</h3>
+                      <p>The Monad deployment wires the registry, treasury, factories, orderbook, and S9-POS. Load a pool above, or create one on the third tab.</p>
                     </div>
-                    <small id="dex-amount-note">
-                      {inputAmount === null && amountIn ? 'Use a decimal amount within the token precision.' : tokenIn ? `${tokenIn.decimals ?? '?'} decimals` : 'Token metadata pending'}
-                    </small>
+                  ) : poolGate ?? (!pool?.hasLiquidity ? (
+                    <div className="dex-pool-gate">
+                      <strong>Pool found, waiting for liquidity.</strong>
+                      <p>Both reserve fields must be nonzero before swaps price. Use the Liquidity tab to seed the first position.</p>
+                      <button className="dex-button dex-button--outline dex-button--small" type="button" onClick={() => setTab('liquidity')}>
+                        Go to liquidity
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="dex-token-pair">
+                        <div className="dex-token-box">
+                          <span>YOU SEND</span>
+                          <strong>{tokenSymbol(tokenIn)}</strong>
+                          <code>{tokenIn ? shortenAddress(tokenIn.address) : EMPTY}</code>
+                        </div>
+                        <button
+                          className="dex-direction-toggle"
+                          type="button"
+                          aria-label="Reverse token direction"
+                          onClick={() => setDirection((current) => current === 'token0' ? 'token1' : 'token0')}
+                        >
+                          <span aria-hidden="true">&lt;-&gt;</span>
+                        </button>
+                        <div className="dex-token-box dex-token-box--receive">
+                          <span>YOU RECEIVE</span>
+                          <strong>{tokenSymbol(tokenOut)}</strong>
+                          <code>{tokenOut ? shortenAddress(tokenOut.address) : EMPTY}</code>
+                        </div>
+                      </div>
+
+                      <label className="dex-amount-field" htmlFor="dex-amount-in">
+                        <span><b>Amount in</b><i>Balance {wallet.address ? formatTokenValue(walletToken?.balance ?? null, tokenIn) : 'connect wallet'}</i></span>
+                        <div>
+                          <input
+                            id="dex-amount-in"
+                            value={amountIn}
+                            onChange={(event) => {
+                              setAmountIn(event.target.value);
+                              setActionError(null);
+                            }}
+                            placeholder="0.00"
+                            inputMode="decimal"
+                            autoComplete="off"
+                            aria-describedby="dex-amount-note"
+                          />
+                          <strong>{tokenSymbol(tokenIn)}</strong>
+                          <button type="button" onClick={handleMaxAmount} disabled={walletToken?.balance == null}>MAX</button>
+                        </div>
+                        <small id="dex-amount-note">
+                          {inputAmount === null && amountIn
+                            ? 'Use a decimal amount within the token precision.'
+                            : insufficientBalance
+                              ? `Balance is short of this amount.`
+                              : tokenIn ? `${tokenIn.decimals ?? '?'} decimals` : 'Token metadata pending'}
+                        </small>
+                      </label>
+
+                      <div className="dex-quote-panel" aria-live="polite">
+                        <div className="dex-quote-panel__main">
+                          <span>ESTIMATED RECEIVED</span>
+                          <strong>{currentQuoteLoading ? 'Reading...' : formatTokenValue(currentQuote, tokenOut, 6)}</strong>
+                          <small>{tokenOut ? tokenSymbol(tokenOut) : 'quote unavailable'} / pool quote</small>
+                        </div>
+                        <dl>
+                          <div><dt>Minimum received</dt><dd>{formatTokenValue(minimumOut, tokenOut, 6)}</dd></div>
+                          <div><dt>LP fee</dt><dd>{formatFeePpm(pool?.feePpm ?? null)}</dd></div>
+                          <div><dt>Slippage</dt><dd>{slippage}%</dd></div>
+                        </dl>
+                      </div>
+                      <div className="dex-trade-settings">
+                        <label htmlFor="dex-slippage">Slippage</label>
+                        <select id="dex-slippage" value={slippage} onChange={(event) => setSlippage(event.target.value)}>
+                          <option value="0.1">0.1%</option>
+                          <option value="0.5">0.5%</option>
+                          <option value="1">1%</option>
+                          <option value="2">2%</option>
+                        </select>
+                        <span>{wallet.address ? (walletToken?.allowance == null ? 'Allowance read pending' : approvalRequired ? 'Approval required' : 'Allowance ready') : 'Connect to approve ERC20'}</span>
+                      </div>
+
+                      <div className="dex-action-block">
+                        <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!actionReady || walletBusy}>
+                          {tradeButtonLabel} <span aria-hidden="true">-&gt;</span>
+                        </button>
+                        <p className="dex-trade-note">Swaps are simulated against the live allowance and balance before signing. SpotPool writes use ERC20 <code>approve</code> then <code>swapExactIn</code>; native MON must be wrapped first.</p>
+                      </div>
+                    </>
+                  ))}
+                </form>
+              )}
+
+              {tab === 'liquidity' && (
+                <div className="dex-tabpanel" id="dex-panel-liquidity" role="tabpanel" aria-labelledby="dex-tab-liquidity">
+                  {emptyState ? (
+                    <div className="dex-empty">
+                      <span className="dex-empty__mark">09</span>
+                      <span className="panel-kicker">NO POOL LOADED</span>
+                      <h3>Point at a pool before you fund it.</h3>
+                      <p>Load a SpotPool above, or create one on the next tab and it will be selected for you automatically.</p>
+                    </div>
+                  ) : poolGate ?? (
+                    <>
+                      <div className="dex-position-card">
+                        <div>
+                          <span>YOUR LP SHARES</span>
+                          <strong>{wallet.address ? (walletShares === null ? EMPTY : walletShares.toString()) : 'connect wallet'}</strong>
+                          <small>{shareOfPoolPpm === null ? 'share of pool pending' : `${formatUnits(shareOfPoolPpm, 4, 4)}% of pool`}</small>
+                        </div>
+                        <div>
+                          <span>POOL RESERVES</span>
+                          <strong>{formatTokenValue(pool?.reserves?.reserve0 ?? null, pool?.token0 ?? null)} / {formatTokenValue(pool?.reserves?.reserve1 ?? null, pool?.token1 ?? null)}</strong>
+                          <small>{tokenSymbol(pool?.token0 ?? null)} / {tokenSymbol(pool?.token1 ?? null)}</small>
+                        </div>
+                      </div>
+
+                      <form className="dex-liquidity-form" onSubmit={handleAddLiquidity}>
+                        <h3 className="dex-subhead">Add liquidity</h3>
+                        {(['token0', 'token1'] as const).map((side) => {
+                          const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
+                          const held = side === 'token0' ? walletToken0 : walletToken1;
+                          const value = side === 'token0' ? addAmount0 : addAmount1;
+                          const setValue = side === 'token0' ? setAddAmount0 : setAddAmount1;
+                          const parsed = side === 'token0' ? amount0In : amount1In;
+                          const short = side === 'token0' ? insufficient0 : insufficient1;
+                          return (
+                            <label className="dex-amount-field" key={side} htmlFor={`dex-deposit-${side}`}>
+                              <span>
+                                <b>Deposit {tokenSymbol(token)}</b>
+                                <i>Balance {wallet.address ? formatTokenValue(held?.balance ?? null, token) : 'connect wallet'}</i>
+                              </span>
+                              <div>
+                                <input
+                                  id={`dex-deposit-${side}`}
+                                  value={value}
+                                  onChange={(event) => {
+                                    setValue(event.target.value);
+                                    setActionError(null);
+                                  }}
+                                  placeholder="0.00"
+                                  inputMode="decimal"
+                                  autoComplete="off"
+                                />
+                                <strong>{tokenSymbol(token)}</strong>
+                                <button type="button" onClick={() => handleMaxDeposit(side)} disabled={held?.balance == null}>MAX</button>
+                              </div>
+                              <small>
+                                {value && parsed === null
+                                  ? 'Use a decimal amount within the token precision.'
+                                  : short
+                                    ? 'Balance is short of this amount.'
+                                    : poolRatioReady
+                                      ? 'Deposits outside the reserve ratio are refunded by the pool.'
+                                      : 'First deposit sets the opening price of the pool.'}
+                              </small>
+                              {poolRatioReady && (
+                                <button
+                                  className="dex-ratio-button"
+                                  type="button"
+                                  onClick={() => handleMatchRatio(side)}
+                                  disabled={parsed === null}
+                                >
+                                  Match the other side to this amount
+                                </button>
+                              )}
+                            </label>
+                          );
+                        })}
+
+                        <div className="dex-trade-settings">
+                          <label htmlFor="dex-liquidity-slippage">Tolerance</label>
+                          <select id="dex-liquidity-slippage" value={liquiditySlippage} onChange={(event) => setLiquiditySlippage(event.target.value)}>
+                            <option value="0.1">0.1%</option>
+                            <option value="0.5">0.5%</option>
+                            <option value="1">1%</option>
+                            <option value="2">2%</option>
+                            <option value="5">5%</option>
+                          </select>
+                          <span>
+                            {!wallet.address
+                              ? 'Connect to approve both tokens'
+                              : approvalRequired0
+                                ? `${tokenSymbol(pool?.token0 ?? null)} approval required`
+                                : approvalRequired1
+                                  ? `${tokenSymbol(pool?.token1 ?? null)} approval required`
+                                  : 'Both allowances ready'}
+                          </span>
+                        </div>
+
+                        <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!addLiquidityReady || walletBusy}>
+                          {addLiquidityButtonLabel} <span aria-hidden="true">-&gt;</span>
+                        </button>
+                      </form>
+
+                      <form className="dex-liquidity-form dex-liquidity-form--remove" onSubmit={handleRemoveLiquidity}>
+                        <h3 className="dex-subhead">Remove liquidity</h3>
+                        <div className="dex-percent-row" role="group" aria-label="Share of position to withdraw">
+                          {REMOVE_PERCENTS.map((percent) => (
+                            <button
+                              key={percent}
+                              className={`dex-percent${removePercent === percent ? ' dex-percent--active' : ''}`}
+                              type="button"
+                              onClick={() => setRemovePercent(percent)}
+                            >
+                              {percent}%
+                            </button>
+                          ))}
+                        </div>
+                        <dl className="dex-redeem-preview">
+                          <div><dt>Shares burned</dt><dd>{removeShares === null ? EMPTY : removeShares.toString()}</dd></div>
+                          <div><dt>{tokenSymbol(pool?.token0 ?? null)} returned</dt><dd>{formatTokenValue(redeemable?.amount0 ?? null, pool?.token0 ?? null, 6)}</dd></div>
+                          <div><dt>{tokenSymbol(pool?.token1 ?? null)} returned</dt><dd>{formatTokenValue(redeemable?.amount1 ?? null, pool?.token1 ?? null, 6)}</dd></div>
+                        </dl>
+                        <button
+                          className="dex-button dex-button--outline dex-button--full"
+                          type="submit"
+                          disabled={removeShares === null || removeShares === 0n || walletBusy}
+                        >
+                          {busyAction ?? (walletShares ? `Withdraw ${removePercent}%` : 'No position to withdraw')} <span aria-hidden="true">-&gt;</span>
+                        </button>
+                      </form>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {tab === 'orders' && (
+                <div className="dex-tabpanel" id="dex-panel-orders" role="tabpanel" aria-labelledby="dex-tab-orders">
+                  {emptyState ? (
+                    <div className="dex-empty">
+                      <span className="dex-empty__mark">09</span>
+                      <span className="panel-kicker">NO POOL LOADED</span>
+                      <h3>The book follows the pair.</h3>
+                      <p>Orderbook levels are keyed by the pair id, so load or create a SpotPool first and its book comes with it.</p>
+                    </div>
+                  ) : poolGate ?? (!bookInitialized ? (
+                    <div className="dex-pool-gate">
+                      <strong>No book is initialised for this pair.</strong>
+                      <p>DexRegistry opens the Orderbook book when it creates the pool. If this pool predates that wiring, its book cannot take orders.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <form className="dex-order-form" onSubmit={handlePlaceOrder}>
+                        <h3 className="dex-subhead">Limit order</h3>
+                        <div className="dex-side-toggle" role="group" aria-label="Order side">
+                          {(['buy', 'sell'] as const).map((side) => (
+                            <button
+                              key={side}
+                              className={`dex-side${orderSide === side ? ` dex-side--active dex-side--${side}` : ''}`}
+                              type="button"
+                              onClick={() => setOrderSide(side)}
+                            >
+                              <strong>{side === 'buy' ? 'BUY' : 'SELL'}</strong>
+                              <small>{side === 'buy' ? `pay ${tokenSymbol(quoteToken)}` : `pay ${tokenSymbol(baseToken)}`}</small>
+                            </button>
+                          ))}
+                        </div>
+
+                        <label className="dex-amount-field" htmlFor="dex-order-price">
+                          <span><b>Limit price</b><i>{tokenSymbol(quoteToken)} per {tokenSymbol(baseToken)}</i></span>
+                          <div>
+                            <input
+                              id="dex-order-price"
+                              value={orderPrice}
+                              onChange={(event) => { setOrderPrice(event.target.value); setActionError(null); }}
+                              placeholder="0.00"
+                              inputMode="decimal"
+                              autoComplete="off"
+                            />
+                            <strong>{tokenSymbol(quoteToken)}</strong>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const reference = pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null;
+                                if (reference === null || baseToken?.decimals == null || quoteToken?.decimals == null) return;
+                                setOrderPrice(formatUnits(reference * 10n ** BigInt(baseToken.decimals) / 10n ** BigInt(quoteToken.decimals), 18, 12));
+                              }}
+                              disabled={(pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null) === null}
+                            >
+                              SPOT
+                            </button>
+                          </div>
+                          <small>
+                            {orderPrice && orderPriceX18 === null
+                              ? 'Use a decimal price the token pair can represent.'
+                              : `Tick ${dex.orderbook?.bookConfig?.tickSize.toString() ?? EMPTY} / prices are stored at 1e18 precision.`}
+                          </small>
+                        </label>
+
+                        <label className="dex-amount-field" htmlFor="dex-order-amount">
+                          <span>
+                            <b>Amount</b>
+                            <i>Balance {wallet.address ? formatTokenValue(walletToken0?.balance ?? null, baseToken) : 'connect wallet'}</i>
+                          </span>
+                          <div>
+                            <input
+                              id="dex-order-amount"
+                              value={orderAmount}
+                              onChange={(event) => { setOrderAmount(event.target.value); setActionError(null); }}
+                              placeholder="0.00"
+                              inputMode="decimal"
+                              autoComplete="off"
+                            />
+                            <strong>{tokenSymbol(baseToken)}</strong>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (walletToken0?.balance == null || baseToken?.decimals == null) return;
+                                setOrderAmount(formatUnits(walletToken0.balance, baseToken.decimals, baseToken.decimals));
+                              }}
+                              disabled={orderSide !== 'sell' || walletToken0?.balance == null}
+                            >
+                              MAX
+                            </button>
+                          </div>
+                          <small>Always denominated in {tokenSymbol(baseToken)}, the pair's base token.</small>
+                        </label>
+
+                        <div className="dex-trade-settings">
+                          <label htmlFor="dex-order-expiry">Good for</label>
+                          <select id="dex-order-expiry" value={orderExpiry} onChange={(event) => setOrderExpiry(event.target.value)}>
+                            {EXPIRY_PRESETS.map((preset) => (
+                              <option key={preset.seconds} value={preset.seconds}>{preset.label}</option>
+                            ))}
+                          </select>
+                          <span>{escrowApprovalRequired ? `${tokenSymbol(escrowToken)} approval required` : wallet.address ? 'Orderbook allowance ready' : 'Connect to escrow the order'}</span>
+                        </div>
+
+                        <dl className="dex-redeem-preview">
+                          <div><dt>Escrowed now</dt><dd>{formatTokenValue(orderEscrowAmount, escrowToken, 6)} {tokenSymbol(escrowToken)}</dd></div>
+                          <div><dt>You receive if filled</dt><dd>{formatTokenValue(orderProceeds, proceedsToken, 6)} {tokenSymbol(proceedsToken)}</dd></div>
+                          <div><dt>Expires</dt><dd>{orderExpiryAt === null ? EMPTY : formatExpiry(orderExpiryAt)}</dd></div>
+                        </dl>
+
+                        <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!orderReady || walletBusy}>
+                          {orderButtonLabel} <span aria-hidden="true">-&gt;</span>
+                        </button>
+                        <p className="dex-trade-note">
+                          Orders rest on the shared <code>Orderbook</code>; they do not cross each other at placement. A SpotPool swap is what consumes them, so a resting bid fills when the pool trades through your price.
+                        </p>
+                      </form>
+
+                      <section className="dex-order-list" aria-label="Your orders on this pair">
+                        <h3 className="dex-subhead">Your orders</h3>
+                        {!wallet.address ? (
+                          <p className="dex-panel-empty">Connect a wallet to list the orders it has resting on this pair.</p>
+                        ) : dex.myOrders.length === 0 ? (
+                          <p className="dex-panel-empty">No orders from this wallet in the most recent order ids on this pair.</p>
+                        ) : (
+                          [...openOrders, ...closedOrders].map((entry) => {
+                            const status = orderStatusLabel(entry, nowSeconds);
+                            const cancellable = status === 'OPEN' || status === 'PARTIAL' || status === 'EXPIRED';
+                            return (
+                              <article className={`dex-order-row dex-order-row--${entry.order.side === 0 ? 'buy' : 'sell'}`} key={entry.id.toString()}>
+                                <div className="dex-order-row__head">
+                                  <strong>{entry.order.side === 0 ? 'BUY' : 'SELL'}</strong>
+                                  <code>#{entry.id.toString()}</code>
+                                  <span className={`dex-order-status dex-order-status--${status.toLowerCase()}`}>{status}</span>
+                                </div>
+                                <dl>
+                                  <div><dt>Price</dt><dd>{formatPriceX18(entry.order.priceX18, baseToken, quoteToken)}</dd></div>
+                                  <div><dt>Amount</dt><dd>{formatTokenValue(entry.order.amount, baseToken, 6)} {tokenSymbol(baseToken)}</dd></div>
+                                  <div><dt>Filled</dt><dd>{formatTokenValue(entry.order.filled, baseToken, 6)}</dd></div>
+                                  <div><dt>Expires</dt><dd>{formatExpiry(entry.order.expiry)}</dd></div>
+                                </dl>
+                                <button
+                                  className="dex-button dex-button--outline dex-button--small"
+                                  type="button"
+                                  data-order-id={entry.id.toString()}
+                                  onClick={handleCancelOrder}
+                                  disabled={!cancellable || walletBusy}
+                                >
+                                  {cancellable ? 'Cancel and refund escrow' : 'Closed'}
+                                </button>
+                              </article>
+                            );
+                          })
+                        )}
+                      </section>
+                    </>
+                  ))}
+                </div>
+              )}
+
+              {tab === 'create' && (
+                <form
+                  className="dex-tabpanel"
+                  id="dex-panel-create"
+                  role="tabpanel"
+                  aria-labelledby="dex-tab-create"
+                  onSubmit={handleCreatePool}
+                >
+                  <h3 className="dex-subhead">Create a SpotPool</h3>
+                  <p className="dex-trade-note">
+                    <code>DexRegistry.createSpotPool</code> is permissionless: it deploys the pool through SpotPoolFactory and opens the matching Orderbook book in the same transaction. Token order does not matter, the registry sorts the pair.
+                  </p>
+
+                  <label className="dex-field">
+                    <span>Token A</span>
+                    <input
+                      value={createTokenA}
+                      onChange={(event) => { setCreateTokenA(event.target.value); setActionError(null); }}
+                      placeholder="0x... ERC20"
+                      spellCheck="false"
+                      autoComplete="off"
+                    />
+                    <small>{createTokenA && createTokenAAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20 on Monad.'}</small>
+                  </label>
+                  <label className="dex-field">
+                    <span>Token B</span>
+                    <input
+                      value={createTokenB}
+                      onChange={(event) => { setCreateTokenB(event.target.value); setActionError(null); }}
+                      placeholder="0x... ERC20"
+                      spellCheck="false"
+                      autoComplete="off"
+                    />
+                    <small>{createTokenB && createTokenBAddress === null ? 'Not a valid 20-byte address.' : 'Must differ from token A.'}</small>
                   </label>
 
-                  <div className="dex-quote-panel" aria-live="polite">
-                    <div className="dex-quote-panel__main">
-                      <span>ESTIMATED RECEIVED</span>
-                      <strong>{currentQuoteLoading ? 'Reading...' : formatTokenValue(currentQuote, tokenOut, 6)}</strong>
-                      <small>{tokenOut ? tokenSymbol(tokenOut) : 'quote unavailable'} / pool quote</small>
-                    </div>
-                    <dl>
-                      <div><dt>Minimum received</dt><dd>{formatTokenValue(minimumOut, tokenOut, 6)}</dd></div>
-                      <div><dt>Slippage</dt><dd>{slippage}%</dd></div>
-                    </dl>
-                  </div>
-                  <div className="dex-trade-settings">
-                    <label htmlFor="dex-slippage">Slippage</label>
-                    <select id="dex-slippage" value={slippage} onChange={(event) => setSlippage(event.target.value)}>
-                      <option value="0.1">0.1%</option>
-                      <option value="0.5">0.5%</option>
-                      <option value="1">1%</option>
-                      <option value="2">2%</option>
-                    </select>
-                    <span>{wallet.address ? (walletToken?.allowance === null ? 'Allowance read pending' : approvalRequired ? 'Approval required' : 'Allowance ready') : 'Connect to approve ERC20'}</span>
+                  <div className="dex-fee-picker" role="group" aria-label="LP fee tier">
+                    {FEE_PRESETS.map((preset) => (
+                      <button
+                        key={preset.ppm}
+                        className={`dex-fee-option${createFeePpm === preset.ppm ? ' dex-fee-option--active' : ''}`}
+                        type="button"
+                        onClick={() => setCreateFeePpm(preset.ppm)}
+                      >
+                        <strong>{preset.label}</strong>
+                        <small>{preset.note}</small>
+                      </button>
+                    ))}
                   </div>
 
-                  <div className="dex-action-block">
-                    <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!actionReady || busyAction !== null || unresolvedTransaction !== null || wallet.connecting || wallet.switching}>
-                      {tradeButtonLabel} <span aria-hidden="true">-&gt;</span>
-                    </button>
-                     <p className="dex-trade-note">Final swap execution is simulated against the live allowance and balance before signing. SpotPool writes use ERC20 <code>approve</code> then <code>swapExactIn</code>; native MON must be wrapped first.</p>
+                  <div className="dex-field-row">
+                    <label className="dex-field">
+                      <span>LP fee (ppm)</span>
+                      <input
+                        value={createFeePpm}
+                        onChange={(event) => { setCreateFeePpm(event.target.value); setActionError(null); }}
+                        inputMode="numeric"
+                        autoComplete="off"
+                      />
+                      <small>
+                        {createFee === null
+                          ? 'Whole ppm value only.'
+                          : !createFeeWithinLimit
+                            ? `Above the registry ceiling of ${formatPpmLimit(dex.registryWiring.maxLpFeeRatePpm)}.`
+                            : `${formatFeePpm(createFee)} per swap, fixed at creation.`}
+                      </small>
+                    </label>
+                    <label className="dex-field">
+                      <span>Orderbook tick size</span>
+                      <input
+                        value={createTickSize}
+                        onChange={(event) => { setCreateTickSize(event.target.value); setActionError(null); }}
+                        inputMode="numeric"
+                        autoComplete="off"
+                      />
+                      <small>{createTick === null || createTick === 0n ? 'Must be a whole number above zero.' : 'Minimum price increment on the shared book.'}</small>
+                    </label>
                   </div>
-                </>
+
+                  <div className="dex-create-summary">
+                    <span>DERIVED PAIR ID</span>
+                    <code>{createPairId ? `${createPairId.slice(0, 18)}...${createPairId.slice(-8)}` : EMPTY}</code>
+                    <small>keccak256 of the sorted token pair, the same key DexRegistry stores.</small>
+                  </div>
+
+                  <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!createReady || walletBusy}>
+                    {createButtonLabel} <span aria-hidden="true">-&gt;</span>
+                  </button>
+                  <p className="dex-trade-note">The pool is simulated against the live registry first, so a duplicate pair, a fee above the ceiling, or a zero tick is reported before your wallet opens.</p>
+                </form>
               )}
-            </form>
+            </div>
 
             {unresolvedTransaction && (
               <div className="dex-unresolved" role="alert">
@@ -922,6 +1934,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   <PoolMetric label="RESERVE 1" value={formatTokenValue(pool.reserves?.reserve1 ?? null, pool.token1)} note={tokenSymbol(pool.token1)} />
                   <PoolMetric label="SPOT PRICE" value={formatPriceX18(pool.spotPriceX18 ?? pool.reservePriceX18, pool.token0, pool.token1)} note="token1 per token0" />
                   <PoolMetric label="LP FEE" value={formatFeePpm(pool.feePpm)} note="fixed at pool creation" />
+                  <PoolMetric label="TOTAL SHARES" value={pool.totalShares === null ? EMPTY : pool.totalShares.toString()} note="pool LP supply" />
                   <PoolMetric label="PAIR ID" value={pool.pairId ? `${pool.pairId.slice(0, 10)}...` : EMPTY} note="bytes32" />
                 </div>
                 <div className="dex-pool-reading-note">
@@ -981,7 +1994,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           </div>
           <div className="dex-s9pos-note">
             <span>S9-POS</span>
-            <p><strong>DexPositionManager is an ERC-721 position wrapper.</strong> It custodies LP shares and is not the SpotPool swap target. Swaps approve the selected token to the selected SpotPool only.</p>
+            <p><strong>DexPositionManager is an ERC-721 position wrapper.</strong> It custodies LP shares and is not the SpotPool swap target. Swaps and deposits approve the selected token to the selected SpotPool only.</p>
           </div>
         </section>
       </div>

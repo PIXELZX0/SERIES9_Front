@@ -1,5 +1,6 @@
 import {
   CONTRACTS,
+  MONAD,
   encodeAddress,
   encodeCall,
   encodeUint,
@@ -65,7 +66,56 @@ export const DEX_SELECTOR = {
   positionManagerName: '0x06fdde03',
   positionManagerSymbol: '0x95d89b41',
   nextTokenId: '0x75794a3c',
+  createSpotPool: '0x6267f2c2',
+  getSpotPools: '0x7d9ce551',
+  getPerpPools: '0xdba106a4',
+  pairs: '0x673e0481',
+  addLiquidity: '0xe0ab0772',
+  removeLiquidity: '0xe39b0eb5',
+  sharesOf: '0xf5eb42dc',
+  totalShares: '0x3a98ef39',
+  minimumLiquidity: '0xba9a7a56',
+  protocolFees0: '0x47d792c5',
+  protocolFees1: '0x6a2a507b',
+  cancelOrder: '0x514fcac7',
+  nextOrderId: '0x2a58b330',
+  placeOrder: '0x6b8efc36',
+  orders: '0xa85c38ef',
+  levelOf: '0xbaa602c0',
 } as const;
+
+/** `Orderbook.placeOrder` takes the side as a two-member enum, not a bool. */
+export const DEX_ORDER_SIDE = { buy: 0n, sell: 1n } as const;
+
+/** `Order.status` as stored by the Orderbook. */
+export const DEX_ORDER_STATUS = { open: 0, filled: 1, cancelled: 2 } as const;
+
+/**
+ * Custom-error selectors observed from live `eth_call` simulations against the
+ * deployed registry and pool. They are the only way to turn a bare revert into a
+ * sentence the trader can act on.
+ */
+export const DEX_ERROR_MESSAGE: Record<string, string> = {
+  '0x5c6d7b73': 'Both sides of the pair are the same token.',
+  '0x747a60fb': 'The tick size must be greater than zero.',
+  '0xe30ce51e': 'The LP fee exceeds the registry maximum.',
+  '0xad1991f5': 'A token address resolved to the zero address.',
+  '0xd92e233d': 'A supplied address was the zero address.',
+  '0x1f2a2005': 'The contract received a zero amount. Check balances, allowances, and that the tokens actually transfer.',
+  '0xbb55fd27': 'The pool has no liquidity yet.',
+  '0xea8e4eb5': 'The connected wallet is not authorised for this action.',
+  '0x3ee5aeb5': 'The contract rejected a re-entrant call.',
+  '0x2c5211c6': 'The order amount is not accepted. Check the balance actually transferred to the Orderbook.',
+  '0x00bfc921': 'The limit price is not accepted by the book.',
+  '0xd36c8500': 'The expiry must be a future timestamp.',
+  '0x206931ef': 'That order is no longer open.',
+  '0xb6081008': 'No Orderbook book exists for this pair yet.',
+};
+
+export function describeDexRevert(data: unknown): string | null {
+  if (typeof data !== 'string' || !/^0x[0-9a-fA-F]{8}/.test(data)) return null;
+  return DEX_ERROR_MESSAGE[data.slice(0, 10).toLowerCase()] ?? null;
+}
 
 export function dexCall(to: string, data: string): RpcCall {
   return { method: 'eth_call', params: [{ to, data }, 'latest'] };
@@ -105,6 +155,98 @@ export function encodeErc20Allowance(owner: string, spender: string): string {
 
 export function encodeErc20Approve(spender: string, amount: bigint): string {
   return encodeCall(DEX_SELECTOR.approve, [encodeAddress(spender), encodeUint(amount)]);
+}
+
+export function encodeCreateSpotPool(
+  tokenA: string,
+  tokenB: string,
+  lpFeeRatePpm: bigint,
+  tickSize: bigint,
+): string {
+  if (lpFeeRatePpm < 0n || lpFeeRatePpm >= UINT32_LIMIT) throw new Error('LP fee rate must fit in uint32.');
+  return encodeCall(DEX_SELECTOR.createSpotPool, [
+    encodeAddress(tokenA),
+    encodeAddress(tokenB),
+    encodeUint(lpFeeRatePpm),
+    encodeUint(tickSize),
+  ]);
+}
+
+export function encodeGetSpotPools(pairId: string): string {
+  return encodeCall(DEX_SELECTOR.getSpotPools, [encodeBytes32(pairId)]);
+}
+
+export function encodeAddLiquidity(
+  amount0Desired: bigint,
+  amount1Desired: bigint,
+  amount0Min: bigint,
+  amount1Min: bigint,
+  recipient: string,
+): string {
+  return encodeCall(DEX_SELECTOR.addLiquidity, [
+    encodeUint(amount0Desired),
+    encodeUint(amount1Desired),
+    encodeUint(amount0Min),
+    encodeUint(amount1Min),
+    encodeAddress(recipient),
+  ]);
+}
+
+export function encodeRemoveLiquidity(
+  shares: bigint,
+  amount0Min: bigint,
+  amount1Min: bigint,
+  recipient: string,
+): string {
+  return encodeCall(DEX_SELECTOR.removeLiquidity, [
+    encodeUint(shares),
+    encodeUint(amount0Min),
+    encodeUint(amount1Min),
+    encodeAddress(recipient),
+  ]);
+}
+
+/**
+ * `placeOrder(pairId, side, priceX18, amount, expiry, reserved)`.
+ *
+ * `amount` is denominated in the pair's base token (token0). A buy escrows
+ * `priceX18 * amount / 1e18` of the quote token; a sell escrows `amount` of the
+ * base token. The final `uint256` is accepted but has no observed effect on the
+ * resting order, so callers pass zero.
+ */
+export function encodePlaceOrder(
+  pairId: string,
+  side: bigint,
+  priceX18: bigint,
+  amount: bigint,
+  expiry: bigint,
+): string {
+  if (side !== DEX_ORDER_SIDE.buy && side !== DEX_ORDER_SIDE.sell) throw new Error('Order side must be buy or sell.');
+  if (expiry <= 0n || expiry >= 2n ** 64n) throw new Error('Order expiry must fit in uint64.');
+  return encodeCall(DEX_SELECTOR.placeOrder, [
+    encodeBytes32(pairId),
+    encodeUint(side),
+    encodeUint(priceX18),
+    encodeUint(amount),
+    encodeUint(expiry),
+    encodeUint(0n),
+  ]);
+}
+
+export function encodeCancelOrder(orderId: bigint): string {
+  return encodeCall(DEX_SELECTOR.cancelOrder, [encodeUint(orderId)]);
+}
+
+export function encodeOrderRead(orderId: bigint): string {
+  return encodeCall(DEX_SELECTOR.orders, [encodeUint(orderId)]);
+}
+
+export function encodeLevelOf(pairId: string, side: bigint, priceX18: bigint): string {
+  return encodeCall(DEX_SELECTOR.levelOf, [encodeBytes32(pairId), encodeUint(side), encodeUint(priceX18)]);
+}
+
+export function encodeSharesOf(owner: string): string {
+  return encodeCall(DEX_SELECTOR.sharesOf, [encodeAddress(owner)]);
 }
 
 export function encodeSwapExactIn(
@@ -181,6 +323,24 @@ export function decodeDexAddress(result: unknown): string | null {
   return decodeDexAddressRead(result).address;
 }
 
+/** Decode `address[]` return data, rejecting malformed offsets or dirty words. */
+export function decodeDexAddressArray(result: unknown): string[] | null {
+  const words = decodeDexWords(result);
+  if (!words || words.length < 2) return null;
+
+  const [offset, length] = words;
+  if (offset !== 32n) return null;
+  if (length > BigInt(words.length - 2)) return null;
+
+  const addresses: string[] = [];
+  for (let index = 0; index < Number(length); index += 1) {
+    const read = decodeAddressWord(words[2 + index]);
+    if (!read.ready || read.address === null) return null;
+    addresses.push(read.address);
+  }
+  return addresses;
+}
+
 export function decodeDexBytes32(result: unknown): string | null {
   const hex = asHex(result);
   if (!hex || !BYTES32_PATTERN.test(hex)) return null;
@@ -202,6 +362,40 @@ export function decodeDexReserves(result: unknown): DecodedReserves | null {
     reserve0: words[0],
     reserve1: words[1],
     blockTimestampLast: words[2] ?? null,
+  };
+}
+
+export type DecodedOrder = {
+  maker: string;
+  side: number;
+  status: number;
+  expiry: bigint;
+  pairId: string;
+  priceX18: bigint;
+  amount: bigint;
+  filled: bigint;
+  escrow: bigint;
+};
+
+/** Decode `orders(uint256)`; an unwritten slot decodes to a zero-maker order. */
+export function decodeDexOrder(result: unknown): DecodedOrder | null {
+  const words = decodeDexWords(result);
+  if (!words || words.length !== 10) return null;
+
+  const maker = decodeAddressWord(words[0]);
+  if (!maker.ready) return null;
+  if (words[1] > 1n || words[2] > 255n || words[3] >= 2n ** 64n) return null;
+
+  return {
+    maker: maker.address ?? '0x0000000000000000000000000000000000000000',
+    side: Number(words[1]),
+    status: Number(words[2]),
+    expiry: words[3],
+    pairId: `0x${words[4].toString(16).padStart(64, '0')}`,
+    priceX18: words[5],
+    amount: words[6],
+    filled: words[7],
+    escrow: words[8],
   };
 }
 
@@ -356,4 +550,87 @@ export async function simulateSwapExactIn(
   const data = encodeSwapExactIn(token, amountIn, minAmountOut, destination);
   const [result] = await rpcBatch([dexSimulationCall(wallet, pool, data)], signal);
   return decodeDexUint(result);
+}
+
+export type DexSimulation = {
+  ok: boolean;
+  returnData: string | null;
+  error: string | null;
+};
+
+/**
+ * Dry-run a write with `eth_call` before it is signed. The RPC batch helper
+ * swallows per-call errors, so this uses a dedicated request to keep the revert
+ * payload and turn known custom errors into readable copy.
+ */
+export async function simulateDexWrite(
+  from: string,
+  to: string,
+  data: string,
+  signal?: AbortSignal,
+): Promise<DexSimulation> {
+  const wallet = normalizeDexAddress(from);
+  const target = normalizeDexAddress(to);
+  if (!wallet || !target) return { ok: false, returnData: null, error: 'A malformed address blocked the simulation.' };
+
+  let response: Response;
+  try {
+    response = await fetch(MONAD.rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ from: wallet, to: target, data }, 'latest'] }),
+      signal,
+    });
+  } catch {
+    return { ok: false, returnData: null, error: 'The simulation request to Monad failed.' };
+  }
+  if (!response.ok) return { ok: false, returnData: null, error: `Simulation RPC ${response.status}.` };
+
+  let body: { result?: unknown; error?: { message?: unknown; data?: unknown } };
+  try {
+    body = await response.json() as typeof body;
+  } catch {
+    return { ok: false, returnData: null, error: 'The simulation response was not valid JSON.' };
+  }
+
+  if (body.error) {
+    const known = describeDexRevert(body.error.data);
+    const raw = typeof body.error.message === 'string' ? body.error.message : 'The simulation reverted.';
+    return { ok: false, returnData: null, error: known ?? raw };
+  }
+  if (typeof body.result !== 'string') return { ok: false, returnData: null, error: 'The simulation returned no data.' };
+  return { ok: true, returnData: body.result, error: null };
+}
+
+/** Read every SpotPool the registry has recorded for a token pair. */
+export async function readSpotPoolsForPair(pairId: string, signal?: AbortSignal): Promise<string[] | null> {
+  if (!BYTES32_PATTERN.test(pairId)) return null;
+  const [result] = await rpcBatch([dexCall(DEX_CONTRACTS.registry, encodeGetSpotPools(pairId))], signal);
+  return decodeDexAddressArray(result);
+}
+
+/**
+ * Read a window of order slots. `nextOrderId` counts up from one, so the newest
+ * `limit` ids cover every order a wallet could still have open without walking
+ * the whole book.
+ */
+export async function readOrderWindow(
+  nextOrderId: bigint,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<Array<{ id: bigint; order: DecodedOrder }>> {
+  if (nextOrderId <= 1n || limit <= 0) return [];
+
+  const highest = nextOrderId - 1n;
+  const lowest = highest > BigInt(limit) ? highest - BigInt(limit) + 1n : 1n;
+  const ids: bigint[] = [];
+  for (let id = highest; id >= lowest; id -= 1n) ids.push(id);
+
+  const results = await rpcBatch(ids.map((id) => dexCall(DEX_CONTRACTS.orderbook, encodeOrderRead(id))), signal);
+  const orders: Array<{ id: bigint; order: DecodedOrder }> = [];
+  results.forEach((result, index) => {
+    const order = decodeDexOrder(result);
+    if (order !== null) orders.push({ id: ids[index], order });
+  });
+  return orders;
 }

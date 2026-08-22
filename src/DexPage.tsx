@@ -84,6 +84,14 @@ const EXPIRY_PRESETS: Array<{ seconds: string; label: string }> = [
 
 const PRICE_X18_EXPONENT = 18;
 
+/** Per-page heading copy; purely functional, no marketing lines. */
+const SECTION_HEADINGS: Record<DexTab, { title: string; note: string }> = {
+  swap: { title: 'Swap', note: 'exact-in at spot price' },
+  liquidity: { title: 'Liquidity', note: 'add or remove LP shares' },
+  orders: { title: 'Limit orders', note: 'resting bids and asks' },
+  create: { title: 'Create pool', note: 'deploy a new SpotPool' },
+};
+
 function walletAddressKey(address: string): string {
   return address.toLowerCase();
 }
@@ -1422,6 +1430,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   }
 
   const emptyState = activePoolAddress === null;
+  const sectionHeading = SECTION_HEADINGS[tab];
   const statusLabel = networkState === 'live' ? 'ONCHAIN / LIVE' : networkState === 'loading' ? 'ONCHAIN / READING' : 'ONCHAIN / DEGRADED';
   const walletBusy = busyAction !== null || wallet.connecting || wallet.switching || unresolvedTransaction !== null;
   const swapCtaReady = !wallet.address || !wallet.onMonad
@@ -1492,11 +1501,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       <div className="container">
         <div className="dex-heading">
           <div>
-            <p className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />SERIES9 DEX / MONAD 143</p>
-            <h1 id="dex-page-title">Trade the signal<br /><em>with receipts.</em></h1>
+            <p className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />SERIES9 DEX / MONAD CHAIN 143</p>
+            <h1 id="dex-page-title">{sectionHeading.title}<br /><em>{sectionHeading.note}</em></h1>
           </div>
           <div className="dex-heading__aside">
-            <p>Create a pool, seed it, and swap against it. Every write is dry-run against the live chain before your wallet is asked to sign.</p>
+            <p>Every write is simulated against live chain state before your wallet is asked to sign.</p>
             <div className={`dex-onchain-status dex-onchain-status--${networkState}`} role="status">
               <span />
               <strong>{statusLabel}</strong>
@@ -1679,15 +1688,14 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 >
                   {emptyState ? (
                     <div className="dex-empty">
-                      <span className="dex-empty__mark">09</span>
                       <span className="panel-kicker">NO POOL LOADED</span>
-                      <h3>Factories are live. The pair is yours to point at.</h3>
-                      <p>The Monad deployment wires the registry, treasury, factories, orderbook, and S9-POS. Load a pool above, or create one on the Create pool page.</p>
+                      <h3>Load a SpotPool to start swapping.</h3>
+                      <p>Load an existing pool by address or pair search above, or deploy a new pair on the Create pool page.</p>
                     </div>
                   ) : poolGate ?? (!pool?.hasLiquidity ? (
                     <div className="dex-pool-gate">
                       <strong>Pool found, waiting for liquidity.</strong>
-                      <p>Both reserve fields must be nonzero before swaps price. Use the Liquidity tab to seed the first position.</p>
+                      <p>Both reserve fields must be nonzero before swaps price. Use the Liquidity page to seed the first position.</p>
                       <button className="dex-button dex-button--outline dex-button--small" type="button" onClick={() => setTab('liquidity')}>
                         Go to liquidity
                       </button>
@@ -1812,9 +1820,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 <div className="dex-tabpanel" id="dex-panel-liquidity">
                   {emptyState ? (
                     <div className="dex-empty">
-                      <span className="dex-empty__mark">09</span>
                       <span className="panel-kicker">NO POOL LOADED</span>
-                      <h3>Point at a pool before you fund it.</h3>
+                      <h3>Select a pool before adding liquidity.</h3>
                       <p>Load a SpotPool above, or create one on the Create pool page and it will be selected for you automatically.</p>
                     </div>
                   ) : poolGate ?? (
@@ -1946,9 +1953,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 <div className="dex-tabpanel" id="dex-panel-orders">
                   {emptyState ? (
                     <div className="dex-empty">
-                      <span className="dex-empty__mark">09</span>
                       <span className="panel-kicker">NO POOL LOADED</span>
-                      <h3>The book follows the pair.</h3>
+                      <h3>Load a pool to open its orderbook.</h3>
                       <p>Orderbook levels are keyed by the pair id, so load or create a SpotPool first and its book comes with it.</p>
                     </div>
                   ) : poolGate ?? (!bookInitialized ? (
@@ -2222,7 +2228,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             ) : (
               <section className="dex-telemetry-panel dex-telemetry-panel--quiet">
                 <span className="panel-kicker">POOL TELEMETRY</span>
-                <h2>Nothing invented here.</h2>
+                <h2>No pool readings yet.</h2>
                 <p>Live cards appear only after a real SpotPool, token metadata, pair ID, and reserve tuple are read from Monad.</p>
               </section>
             )}
@@ -2253,7 +2259,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
         <section className="dex-infrastructure" aria-labelledby="dex-infrastructure-title">
           <div className="dex-section-heading">
-            <div><span className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />DEPLOYED WIRING</span><h2 id="dex-infrastructure-title">The machine<br /><em>behind the market.</em></h2></div>
+            <div><span className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />DEPLOYED CONTRACTS</span><h2 id="dex-infrastructure-title">Core contracts<br /><em>on Monad.</em></h2></div>
             <p>Every address below is the supplied Monad mainnet deployment. Registry reads are compared against these anchors; mismatches stay visible.</p>
           </div>
           <div className="dex-infra-grid">

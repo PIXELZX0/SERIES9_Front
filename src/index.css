@@ -4904,7 +4904,7 @@ a:focus-visible {
 .dex-heading h1 {
   max-width: 670px;
   margin-top: 25px;
-  font-size: clamp(3.9rem, 7vw, 6.7rem);
+  font-size: clamp(2.8rem, 4.6vw, 4.3rem);
 }
 
 .dex-heading h1 em,
@@ -5906,17 +5906,6 @@ a:focus-visible {
   padding: 19px 0 11px;
 }
 
-.dex-empty__mark {
-  display: grid;
-  width: 47px;
-  height: 47px;
-  place-items: center;
-  border: 1px solid var(--gold);
-  color: var(--gold-bright);
-  font-family: var(--serif);
-  font-size: 19px;
-}
-
 .dex-empty h3,
 .dex-pool-gate strong {
   max-width: 440px;
@@ -6624,7 +6613,7 @@ a:focus-visible {
   }
 
   .dex-heading h1 {
-    font-size: clamp(3.45rem, 16vw, 5.2rem);
+    font-size: clamp(2.4rem, 10vw, 3.2rem);
   }
 
   .dex-toolbar {

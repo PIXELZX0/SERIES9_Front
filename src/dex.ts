@@ -35,7 +35,7 @@ export function normalizeDexAddress(value: string | null | undefined): string | 
 export const DEX_CONFIG = {
   chainId: 143,
   pollIntervalMs: 10_000,
-  spotPoolAddress: normalizeDexAddress(env.VITE_DEX_SPOT_POOL_ADDRESS),
+  spotPoolAddress: normalizeDexAddress(env.VITE_DEX_SPOT_POOL_ADDRESS) ?? '0x59ff9b19a3dd513ec9f1146836712f7ef7f2176c',
 } as const;
 
 export const DEX_SELECTOR = {

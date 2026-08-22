@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
 import {
   DEX_CONFIG,
   DEX_CONTRACTS,
@@ -44,7 +52,6 @@ type DexOperation = {
   walletKey: string | null;
 };
 
-/** Mutable half of the in-flight operation, held in a ref so it is never React state. */
 type DexOperationProgress = {
   hash: string | null;
   unresolved: boolean;
@@ -66,7 +73,13 @@ const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const IDLE_POOL_FINDER: PoolFinderState = { status: 'idle', pairId: null, pools: [], error: null };
 
-/** Presets mirror the registry's parts-per-million fee scale: 10_000 ppm = 1%. */
+const TABS: Array<[DexTab, string]> = [
+  ['swap', 'Swap'],
+  ['liquidity', 'Liquidity'],
+  ['orders', 'Limit'],
+  ['create', 'Create'],
+];
+
 const FEE_PRESETS: Array<{ ppm: string; label: string; note: string }> = [
   { ppm: '500', label: '0.05%', note: 'stable pairs' },
   { ppm: '3000', label: '0.30%', note: 'standard' },
@@ -76,21 +89,15 @@ const FEE_PRESETS: Array<{ ppm: string; label: string; note: string }> = [
 const REMOVE_PERCENTS = [25, 50, 75, 100] as const;
 
 const EXPIRY_PRESETS: Array<{ seconds: string; label: string }> = [
-  { seconds: '3600', label: '1 hour' },
-  { seconds: '86400', label: '1 day' },
-  { seconds: '604800', label: '7 days' },
-  { seconds: '2592000', label: '30 days' },
+  { seconds: '3600', label: '1H' },
+  { seconds: '86400', label: '1D' },
+  { seconds: '604800', label: '7D' },
+  { seconds: '2592000', label: '30D' },
 ];
 
-const PRICE_X18_EXPONENT = 18;
+const TOLERANCE_PRESETS = ['0.1', '0.5', '1', '2', '5'] as const;
 
-/** Per-page heading copy; purely functional, no marketing lines. */
-const SECTION_HEADINGS: Record<DexTab, { title: string; note: string }> = {
-  swap: { title: 'Swap', note: 'exact-in at spot price' },
-  liquidity: { title: 'Liquidity', note: 'add or remove LP shares' },
-  orders: { title: 'Limit orders', note: 'resting bids and asks' },
-  create: { title: 'Create pool', note: 'deploy a new SpotPool' },
-};
+const PRICE_X18_EXPONENT = 18;
 
 function walletAddressKey(address: string): string {
   return address.toLowerCase();
@@ -268,7 +275,6 @@ function parseSlippageBps(value: string): number | null {
   return Number.isSafeInteger(basisPoints) && basisPoints >= 0 && basisPoints <= 5_000 ? basisPoints : null;
 }
 
-/** Whole-number field used for the registry's uint256 tick size. */
 function parseWholeUint(value: string): bigint | null {
   const normalized = value.trim().replace(/,/g, '');
   if (!/^\d+$/.test(normalized)) return null;
@@ -280,10 +286,6 @@ function parseWholeUint(value: string): bigint | null {
   }
 }
 
-/**
- * The book prices in raw quote per raw base, scaled by 1e18, so a human price
- * needs the decimal gap between the two tokens folded in before parsing.
- */
 function parsePriceToX18(value: string, baseDecimals: number | null, quoteDecimals: number | null): bigint | null {
   if (baseDecimals === null || quoteDecimals === null) return null;
   const scale = PRICE_X18_EXPONENT + quoteDecimals - baseDecimals;
@@ -291,7 +293,6 @@ function parsePriceToX18(value: string, baseDecimals: number | null, quoteDecima
   return parseTokenAmount(value, scale);
 }
 
-/** Buy orders escrow quote, sell orders escrow base. */
 function orderEscrow(side: OrderSide, priceX18: bigint, amount: bigint): bigint {
   return side === 'buy' ? priceX18 * amount / 10n ** 18n : amount;
 }
@@ -327,58 +328,22 @@ function firstDexUnresolvedTransaction(transactions: DexUnresolvedTransactions):
   return null;
 }
 
-function formatLevelPrice(
-  priceX18: bigint | null,
-  pool: DexPoolSnapshot,
-): string {
+function formatLevelPrice(priceX18: bigint | null, pool: DexPoolSnapshot): string {
   if (priceX18 === 0n) return 'Empty';
   return formatPriceX18(priceX18, pool.token0, pool.token1);
 }
 
-function InfrastructureCard({
-  label,
-  address,
-  note,
-  detail,
-}: {
-  label: string;
-  address: string;
-  note: string;
-  detail?: string;
-}) {
-  return (
-    <article className="dex-infra-card">
-      <div className="dex-infra-card__topline">
-        <span className="dex-infra-card__index" aria-hidden="true">/</span>
-        <span>{note}</span>
-      </div>
-      <strong>{label}</strong>
-      <code>{shortenAddress(address)}</code>
-      {detail && <small>{detail}</small>}
-      <a href={explorerAddressUrl(address)} target="_blank" rel="noreferrer">
-        Open on explorer <span aria-hidden="true">-&gt;</span>
-      </a>
-    </article>
-  );
-}
-
-function PoolMetric({ label, value, note }: { label: string; value: string; note?: string }) {
-  return (
-    <div className="dex-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {note && <small>{note}</small>}
-    </div>
-  );
+function invertPriceX18(priceX18: bigint): bigint | null {
+  return priceX18 > 0n ? 10n ** 36n / priceX18 : null;
 }
 
 const BADGE_GRADIENTS = [
-  ['#c9a45d', '#76571f'],
-  ['#6a7f56', '#2f3d27'],
-  ['#b15b42', '#5c2417'],
-  ['#8a7fb8', '#3c3460'],
-  ['#4f8a8b', '#1f4041'],
-  ['#c47d5d', '#6b3a24'],
+  ['#ecd69b', '#8a6a2f'],
+  ['#e6e2d6', '#6f6c62'],
+  ['#d9bc74', '#4a3813'],
+  ['#f0ead8', '#8f887a'],
+  ['#c8c2ae', '#55503f'],
+  ['#e0c684', '#5c4718'],
 ] as const;
 
 function badgeGradient(address: string): string {
@@ -391,12 +356,179 @@ function badgeGradient(address: string): string {
 }
 
 function TokenBadge({ token }: { token: DexToken | null }) {
-  if (!token) return <span className="dex-token-badge dex-token-badge--empty" aria-hidden="true">?</span>;
+  if (!token) {
+    return (
+      <span className="dx-badge dx-badge--empty" aria-hidden="true">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="9" /></svg>
+      </span>
+    );
+  }
   const initials = (token.symbol?.trim() || token.address.slice(2, 5)).slice(0, 3).toUpperCase();
   return (
-    <span className="dex-token-badge" style={{ background: badgeGradient(token.address) }} aria-hidden="true">
+    <span className="dx-badge" style={{ background: badgeGradient(token.address) }} aria-hidden="true">
       {initials}
     </span>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <polyline points="21 3 21 9 15 9" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+function FlipArrowIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="12" y1="4" x2="12" y2="20" />
+      <polyline points="18 14 12 20 6 14" />
+    </svg>
+  );
+}
+
+function RepeatIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="17 1 21 5 17 9" />
+      <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+      <polyline points="7 23 3 19 7 15" />
+      <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+    </svg>
+  );
+}
+
+type TokenPanelProps = {
+  label: string;
+  value: string;
+  onValueChange?: (value: string) => void;
+  inputLabel: string;
+  placeholder?: string;
+  readOnly?: boolean;
+  loading?: boolean;
+  token: DexToken | null;
+  meta?: string;
+  metaActionLabel?: string;
+  onMetaAction?: () => void;
+  metaActionDisabled?: boolean;
+  onTokenClick?: () => void;
+  sub?: ReactNode;
+  error?: boolean;
+};
+
+function TokenPanel({
+  label,
+  value,
+  onValueChange,
+  inputLabel,
+  placeholder = '0.0',
+  readOnly = false,
+  loading = false,
+  token,
+  meta,
+  metaActionLabel,
+  onMetaAction,
+  metaActionDisabled,
+  onTokenClick,
+  sub,
+  error = false,
+}: TokenPanelProps) {
+  return (
+    <div className={`dx-panel${error ? ' dx-panel--error' : ''}`}>
+      <div className="dx-panel__top">
+        <span>{label}</span>
+        {(meta !== undefined || metaActionLabel !== undefined) && (
+          <i className="dx-panel__meta">
+            {meta}
+            {metaActionLabel && (
+              <button type="button" onClick={onMetaAction} disabled={metaActionDisabled}>
+                {metaActionLabel}
+              </button>
+            )}
+          </i>
+        )}
+      </div>
+      <div className="dx-panel__main">
+        <input
+          value={loading && readOnly ? '' : value}
+          onChange={onValueChange ? (event) => onValueChange(event.target.value) : undefined}
+          onFocus={readOnly ? (event) => event.currentTarget.blur() : undefined}
+          placeholder={loading && readOnly ? 'Fetching…' : placeholder}
+          readOnly={readOnly}
+          inputMode={readOnly ? undefined : 'decimal'}
+          autoComplete="off"
+          spellCheck="false"
+          aria-label={inputLabel}
+        />
+        {onTokenClick && (
+          <button type="button" className="dx-token-pill" onClick={onTokenClick} aria-label={`Change token, currently ${tokenSymbol(token)}`}>
+            <TokenBadge token={token} />
+            <strong>{tokenSymbol(token)}</strong>
+            <ChevronDownIcon />
+          </button>
+        )}
+      </div>
+      {sub && <small className="dx-panel__sub">{sub}</small>}
+    </div>
+  );
+}
+
+type AmountFieldProps = {
+  id: string;
+  title: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+  symbol: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  actionDisabled?: boolean;
+  note: string;
+};
+
+function AmountField({ id, title, hint, value, onChange, symbol, actionLabel, onAction, actionDisabled, note }: AmountFieldProps) {
+  return (
+    <label className="dx-field" htmlFor={id}>
+      <span className="dx-field__top">
+        <b>{title}</b>
+        <i>{hint}</i>
+      </span>
+      <div className="dx-field__row">
+        <input
+          id={id}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="0.00"
+          inputMode="decimal"
+          autoComplete="off"
+          spellCheck="false"
+        />
+        <strong>{symbol}</strong>
+        {actionLabel && onAction && (
+          <button type="button" onClick={onAction} disabled={actionDisabled}>{actionLabel}</button>
+        )}
+      </div>
+      <small>{note}</small>
+    </label>
   );
 }
 
@@ -408,7 +540,6 @@ type SwapSettingsProps = {
 };
 
 function SwapSettings({ open, slippage, onSlippageChange, onClose }: SwapSettingsProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -419,31 +550,29 @@ function SwapSettings({ open, slippage, onSlippageChange, onClose }: SwapSetting
   }, [open, onClose]);
 
   if (!open) return null;
-  const parsed = parseSlippageBps(slippage);
+  const valid = parseSlippageBps(slippage) !== null;
 
   return (
     <>
-      <button type="button" className="dex-pop-backdrop" aria-label="Close swap settings" onClick={onClose} />
-      <div className="dex-settings" role="dialog" aria-label="Swap settings">
-        <div className="dex-settings__head">
-          <h3>Swap settings</h3>
-          <button type="button" onClick={onClose} aria-label="Close">✕</button>
+      <button type="button" className="dx-backdrop" aria-label="Close swap settings" onClick={onClose} />
+      <div className="dx-settings" role="dialog" aria-label="Swap settings">
+        <div className="dx-settings__head">
+          <span>Max slippage</span>
+          <code>{valid ? `${slippage}%` : '—'}</code>
         </div>
-        <span className="dex-settings__label">Max slippage</span>
-        <div className="dex-settings__row" role="group" aria-label="Slippage presets">
+        <div className="dx-chip-row" role="group" aria-label="Slippage presets">
           {['0.1', '0.5', '1'].map((preset) => (
             <button
               key={preset}
               type="button"
-              className={`dex-chip${slippage === preset ? ' dex-chip--active' : ''}`}
+              className={`dx-chip${slippage === preset ? ' dx-chip--active' : ''}`}
               onClick={() => onSlippageChange(preset)}
             >
               {preset}%
             </button>
           ))}
-          <label className={`dex-chip dex-chip--custom${slippage !== '0.1' && slippage !== '0.5' && slippage !== '1' ? ' dex-chip--active' : ''}`}>
+          <label className={`dx-chip dx-chip--custom${slippage !== '0.1' && slippage !== '0.5' && slippage !== '1' ? ' dx-chip--active' : ''}`}>
             <input
-              ref={inputRef}
               value={slippage}
               onChange={(event) => onSlippageChange(event.target.value)}
               placeholder="Custom"
@@ -454,13 +583,42 @@ function SwapSettings({ open, slippage, onSlippageChange, onClose }: SwapSetting
             %
           </label>
         </div>
-        <small className="dex-settings__hint">
-          {parsed === null
-            ? 'Enter a slippage between 0 and 50%.'
-            : 'Swaps revert instead of filling below this floor.'}
+        <small className="dx-settings__hint">
+          {valid
+            ? 'Swaps revert instead of filling below this floor.'
+            : 'Enter a slippage between 0 and 50%.'}
         </small>
       </div>
     </>
+  );
+}
+
+type ModalProps = {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+};
+
+function Modal({ title, onClose, children }: ModalProps) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div className="dx-modal-layer" role="presentation">
+      <button type="button" className="dx-backdrop" aria-label={`Close ${title}`} onClick={onClose} />
+      <div className="dx-modal" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="dx-modal__head">
+          <h3>{title}</h3>
+          <button type="button" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
   );
 }
 
@@ -480,14 +638,6 @@ function TokenSelectDialog({ side, tokens, balances, selectedIn, selectedOut, on
   const [query, setQuery] = useState('');
   const other = side === 'in' ? selectedOut : selectedIn;
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
   const normalized = query.trim().toLowerCase();
   const visible = tokens.filter((token) =>
     !normalized ||
@@ -495,62 +645,154 @@ function TokenSelectDialog({ side, tokens, balances, selectedIn, selectedOut, on
     token.address.toLowerCase().includes(normalized));
 
   return (
-    <div className="dex-dialog-layer" role="presentation">
-      <button type="button" className="dex-pop-backdrop" aria-label="Close token selector" onClick={onClose} />
-      <div className="dex-token-dialog" role="dialog" aria-modal="true" aria-label={`Select the ${side === 'in' ? 'send' : 'receive'} token`}>
-        <div className="dex-settings__head">
-          <h3>{side === 'in' ? 'You send' : 'You receive'}</h3>
-          <button type="button" onClick={onClose} aria-label="Close">✕</button>
+    <Modal title={side === 'in' ? 'You pay' : 'You receive'} onClose={onClose}>
+      <input
+        className="dx-modal-search"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="Search by symbol or address"
+        spellCheck="false"
+        autoComplete="off"
+      />
+      <div className="dx-token-list">
+        {visible.map((token, index) => {
+          const isSelected = token.address === selectedIn?.address || token.address === selectedOut?.address;
+          return (
+            <button
+              key={token.address}
+              type="button"
+              className={`dx-token-option${isSelected ? ' dx-token-option--selected' : ''}`}
+              onClick={() => onSelect(token)}
+            >
+              <TokenBadge token={token} />
+              <span className="dx-token-option__meta">
+                <strong>{tokenSymbol(token)}</strong>
+                <code>{shortenAddress(token.address)}</code>
+              </span>
+              <span className="dx-token-option__balance">{formatTokenValue(balances[index] ?? null, token, 4)}</span>
+            </button>
+          );
+        })}
+        {visible.length === 0 && <p className="dx-empty-line">No token in the loaded pool matches “{query}”.</p>}
+      </div>
+      {other && <small className="dx-modal-hint">The other side of the pair stays {tokenSymbol(other)}.</small>}
+    </Modal>
+  );
+}
+
+type PoolFinderDialogProps = {
+  addressInput: string;
+  onAddressInput: (value: string) => void;
+  onLoadPool: () => void;
+  finderTokenA: string;
+  finderTokenB: string;
+  onFinderTokenA: (value: string) => void;
+  onFinderTokenB: (value: string) => void;
+  finder: PoolFinderState;
+  onFindPools: (event: FormEvent<HTMLFormElement>) => void;
+  activePoolAddress: string | null;
+  onSelectPool: (address: string) => void;
+  onClose: () => void;
+};
+
+function PoolFinderDialog({
+  addressInput,
+  onAddressInput,
+  onLoadPool,
+  finderTokenA,
+  finderTokenB,
+  onFinderTokenA,
+  onFinderTokenB,
+  finder,
+  onFindPools,
+  activePoolAddress,
+  onSelectPool,
+  onClose,
+}: PoolFinderDialogProps) {
+  return (
+    <Modal title="Load a SpotPool" onClose={onClose}>
+      <label className="dx-finder-address">
+        <span>Paste a pool address</span>
+        <div>
+          <input
+            value={addressInput}
+            onChange={(event) => onAddressInput(event.target.value)}
+            placeholder="0x… deployed SpotPool"
+            spellCheck="false"
+            autoComplete="off"
+          />
+          <button type="button" className="dx-button dx-button--ghost" onClick={onLoadPool}>Load</button>
         </div>
+      </label>
+
+      <div className="dx-finder-divider"><span>or search the registry by pair</span></div>
+
+      <form className="dx-finder-form" onSubmit={onFindPools}>
         <input
-          className="dex-token-dialog__search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search by symbol or address"
+          value={finderTokenA}
+          onChange={(event) => onFinderTokenA(event.target.value)}
+          placeholder="Token A · 0x…"
           spellCheck="false"
           autoComplete="off"
+          aria-label="Token A address"
         />
-        <div className="dex-token-dialog__list">
-          {visible.map((token, index) => {
-            const isSelected = token.address === selectedIn?.address || token.address === selectedOut?.address;
-            return (
-              <button
-                key={token.address}
-                type="button"
-                className={`dex-token-option${isSelected ? ' dex-token-option--selected' : ''}`}
-                onClick={() => onSelect(token)}
-              >
-                <TokenBadge token={token} />
-                <span className="dex-token-option__meta">
-                  <strong>{tokenSymbol(token)}</strong>
-                  <code>{shortenAddress(token.address)}</code>
-                </span>
-                <span className="dex-token-option__balance">{formatTokenValue(balances[index] ?? null, token, 4)}</span>
-              </button>
-            );
-          })}
-          {visible.length === 0 && (
-            <p className="dex-panel-empty">No token in the loaded pool matches “{query}”.</p>
-          )}
-        </div>
-        {other && <small className="dex-settings__hint">The other side of the pair stays {tokenSymbol(other)}.</small>}
+        <input
+          value={finderTokenB}
+          onChange={(event) => onFinderTokenB(event.target.value)}
+          placeholder="Token B · 0x…"
+          spellCheck="false"
+          autoComplete="off"
+          aria-label="Token B address"
+        />
+        <button className="dx-button dx-button--ghost" type="submit" disabled={finder.status === 'loading'}>
+          {finder.status === 'loading' ? 'Reading…' : 'Search'}
+        </button>
+      </form>
+
+      <div className="dx-finder-results" aria-live="polite">
+        {finder.pairId && (
+          <p className="dx-finder-pair">PAIR ID <code>{`${finder.pairId.slice(0, 12)}…${finder.pairId.slice(-6)}`}</code></p>
+        )}
+        {finder.error && <p className="dx-finder-error">{finder.error}</p>}
+        {finder.status === 'done' && finder.pools.length === 0 && (
+          <p className="dx-empty-line">The registry holds no SpotPool for this pair yet.</p>
+        )}
+        {finder.pools.map((address) => (
+          <button
+            key={address}
+            className={`dx-finder-pool${normalizeDexAddress(activePoolAddress)?.toLowerCase() === address.toLowerCase() ? ' dx-finder-pool--active' : ''}`}
+            type="button"
+            onClick={() => onSelectPool(address)}
+          >
+            <code>{shortenAddress(address)}</code>
+            <span>Load <ChevronDownIcon size={10} /></span>
+          </button>
+        ))}
       </div>
+    </Modal>
+  );
+}
+
+function MetricCard({ label, value, note }: { label: string; value: string; note?: string }) {
+  return (
+    <div className="dx-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {note && <small>{note}</small>}
     </div>
   );
 }
 
-function invertPriceX18(priceX18: bigint): bigint | null {
-  return priceX18 > 0n ? 10n ** 36n / priceX18 : null;
-}
-
-function GearIcon() {
+function ContractChip({ name, address, note }: { name: string; address: string; note?: string }) {
   return (
-    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />
-      <line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" />
-      <line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" />
-      <line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />
-    </svg>
+    <article className="dx-contract">
+      <div>
+        <strong>{name}</strong>
+        {note && <small>{note}</small>}
+      </div>
+      <code>{shortenAddress(address)}</code>
+      <a href={explorerAddressUrl(address)} target="_blank" rel="noreferrer">Explorer ↗</a>
+    </article>
   );
 }
 
@@ -571,20 +813,20 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [unresolvedTransactions, setUnresolvedTransactions] = useState<DexUnresolvedTransactions>(readDexUnresolvedTransactions);
   const [currentOperationWalletKey, setCurrentOperationWalletKey] = useState<string | null>(null);
 
+  const [finderOpen, setFinderOpen] = useState(false);
   const [finderTokenA, setFinderTokenA] = useState('');
   const [finderTokenB, setFinderTokenB] = useState('');
   const [finder, setFinder] = useState<PoolFinderState>(IDLE_POOL_FINDER);
 
   const [addAmount0, setAddAmount0] = useState('');
   const [addAmount1, setAddAmount1] = useState('');
-  const [liquiditySlippage, setLiquiditySlippage] = useState('1');
+  const [liquidityTolerance, setLiquidityTolerance] = useState('1');
   const [removePercent, setRemovePercent] = useState<number>(50);
 
   const [orderSide, setOrderSide] = useState<OrderSide>('buy');
   const [orderPrice, setOrderPrice] = useState('');
   const [orderAmount, setOrderAmount] = useState('');
   const [orderExpiry, setOrderExpiry] = useState('86400');
-  /** Wall clock kept in state so render stays pure; refreshed once a minute. */
   const [nowSeconds, setNowSeconds] = useState(0);
 
   const [createTokenA, setCreateTokenA] = useState('');
@@ -676,8 +918,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     ? unresolvedTransactions[currentWalletKey] ?? operationWalletTransaction ?? firstStoredTransaction
     : operationWalletTransaction ?? firstStoredTransaction;
 
-  // ── liquidity ────────────────────────────────────────────────────────────────
-  const liquiditySlippageBps = parseSlippageBps(liquiditySlippage);
+  const liquiditySlippageBps = parseSlippageBps(liquidityTolerance);
   const amount0In = parseTokenAmount(addAmount0, pool?.token0?.decimals ?? null);
   const amount1In = parseTokenAmount(addAmount1, pool?.token1?.decimals ?? null);
   const poolRatioReady = pool?.reserves != null && pool.reserves.reserve0 > 0n && pool.reserves.reserve1 > 0n;
@@ -706,7 +947,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     };
   }, [pool?.reserves, pool?.totalShares, removeShares]);
 
-  // ── limit orders ─────────────────────────────────────────────────────────────
   const baseToken = pool?.token0 ?? null;
   const quoteToken = pool?.token1 ?? null;
   const orderPriceX18 = parsePriceToX18(orderPrice, baseToken?.decimals ?? null, quoteToken?.decimals ?? null);
@@ -741,7 +981,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const openOrders = dex.myOrders.filter((entry) => ['OPEN', 'PARTIAL'].includes(orderStatusLabel(entry, nowSeconds)));
   const closedOrders = dex.myOrders.filter((entry) => !openOrders.includes(entry));
 
-  // ── create ───────────────────────────────────────────────────────────────────
   const createTokenAAddress = normalizeDexAddress(createTokenA);
   const createTokenBAddress = normalizeDexAddress(createTokenB);
   const createPairId = createTokenAAddress && createTokenBAddress
@@ -932,7 +1171,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     return true;
   }
 
-  /** Guard shared by every write entry point: one wallet action at a time, no unresolved receipt. */
   function canStartWrite(): boolean {
     if (unresolvedTransaction !== null) {
       notifyError(`Transaction ${formatHash(unresolvedTransaction.hash)} is unresolved. Verify it before sending another DEX action.`);
@@ -1068,11 +1306,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     }
   }
 
-  /**
-   * Dry-run the calldata with the connected wallet as `from`, then sign it. Every
-   * write on this page goes through here so a revert is reported before a wallet
-   * prompt instead of after a failed transaction.
-   */
   async function simulateThenSend(
     label: string,
     request: { to: string; data: string },
@@ -1304,7 +1537,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     }
   }
 
-  async function handleCancelOrder(event: MouseEvent<HTMLButtonElement>) {
+  async function handleCancelOrder(event: ReactMouseEvent<HTMLButtonElement>) {
     const raw = event.currentTarget.dataset.orderId ?? '';
     const orderId = parseWholeUint(raw);
     if (orderId === null || orderId === 0n) return;
@@ -1406,7 +1639,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     }
   }
 
-  /** Mirror a deposit across the live reserve ratio so the pool takes both sides whole. */
   function handleMatchRatio(side: 'token0' | 'token1') {
     if (!poolRatioReady || pool?.reserves == null || pool.token0 == null || pool.token1 == null) return;
     const { reserve0, reserve1 } = pool.reserves;
@@ -1430,12 +1662,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   }
 
   const emptyState = activePoolAddress === null;
-  const sectionHeading = SECTION_HEADINGS[tab];
-  const statusLabel = networkState === 'live' ? 'ONCHAIN / LIVE' : networkState === 'loading' ? 'ONCHAIN / READING' : 'ONCHAIN / DEGRADED';
   const walletBusy = busyAction !== null || wallet.connecting || wallet.switching || unresolvedTransaction !== null;
-  const swapCtaReady = !wallet.address || !wallet.onMonad
-    ? true
-    : actionReady;
+  const swapCtaReady = !wallet.address || !wallet.onMonad ? true : actionReady;
   const tradeButtonLabel = busyAction ?? (
     !wallet.address
       ? 'Connect wallet'
@@ -1479,319 +1707,220 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     !wallet.address ? 'Connect wallet' : !wallet.onMonad ? 'Switch to Monad' : 'Create SpotPool'
   );
 
-  const poolGate = pool?.invalidAddress ? (
-    <div className="dex-pool-gate dex-pool-gate--error">
-      <strong>Address format rejected.</strong>
-      <p>{pool.error}</p>
+  const gateCopy = emptyState
+    ? {
+        title: 'No pool loaded',
+        body: 'Paste a SpotPool address or search the registry by token pair to start trading.',
+        action: 'Select a pool' as const,
+      }
+    : pool?.invalidAddress
+      ? {
+          title: 'Address rejected',
+          body: pool.error ?? 'The supplied address is not a well-formed SpotPool address.',
+          action: 'Select a pool' as const,
+        }
+      : !registryReady
+        ? {
+            title: 'Registry wiring unverified',
+            body: 'Writes stay hidden until the configured registry, pool, Orderbook, and treasury addresses agree on-chain.',
+            action: 'Retry reads' as const,
+          }
+        : !pool?.valid
+          ? {
+              title: 'Reading the selected pool',
+              body: pool?.error ?? 'Write controls stay hidden until DexRegistry confirms this pool.',
+              action: 'Select a pool' as const,
+            }
+          : null;
+
+  function renderGate() {
+    if (gateCopy === null) return null;
+    return (
+      <div className="dx-gate">
+        <span className="dx-gate__glyph" aria-hidden="true">✦</span>
+        <h3>{gateCopy.title}</h3>
+        <p>{gateCopy.body}</p>
+        <div className="dx-gate__actions">
+          <button className="dx-button dx-button--solid" type="button" onClick={() => setFinderOpen(true)}>
+            Select a pool
+          </button>
+          {!emptyState && !pool?.valid && (
+            <button className="dx-button dx-button--ghost" type="button" onClick={dex.refresh} disabled={dex.loading}>
+              Retry reads
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const noLiquidityGate = poolVerified && pool !== null && !pool.hasLiquidity && (
+    <div className="dx-gate">
+      <span className="dx-gate__glyph" aria-hidden="true">◇</span>
+      <h3>Pool found, awaiting liquidity</h3>
+      <p>Both reserves must be nonzero before swaps can price. Seed the first position to open trading.</p>
+      <div className="dx-gate__actions">
+        <button className="dx-button dx-button--solid" type="button" onClick={() => setTab('liquidity')}>
+          Add liquidity
+        </button>
+      </div>
     </div>
-  ) : !registryReady ? (
-    <div className="dex-pool-gate dex-pool-gate--error">
-      <strong>Registry wiring is not verified.</strong>
-      <p>Write controls stay hidden until the configured registry, pool, Orderbook, and treasury addresses agree on-chain.</p>
-    </div>
-  ) : !pool?.valid ? (
-    <div className="dex-pool-gate">
-      <strong>{pool?.error ?? 'Reading the selected pool.'}</strong>
-      <p>Write controls stay hidden until DexRegistry confirms the pool and reserves return as a valid tuple.</p>
-    </div>
-  ) : null;
+  );
+
+  const swapSubIn = inputAmount === null && amountIn.trim() !== ''
+    ? 'Use a decimal amount within the token precision.'
+    : insufficientBalance
+      ? 'Balance is short of this amount.'
+      : tokenIn
+        ? `${wallet.address ? 'Approved' : 'Connect to approve'} · ERC20`
+        : 'Token metadata pending';
+
+  const swapSubOut = currentQuoteError ?? (
+    currentQuote === null
+      ? 'Enter an amount for the live pool quote.'
+      : `Min received ${formatTokenValue(minimumOut, tokenOut, 6)} after ${slippage}% slippage`
+  );
 
   return (
     <section className="workspace-section workspace-section--dex" aria-labelledby="dex-page-title">
-      <div className="container">
-        <div className="dex-heading">
-          <div>
-            <p className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />SERIES9 DEX / MONAD CHAIN 143</p>
-            <h1 id="dex-page-title">{sectionHeading.title}<br /><em>{sectionHeading.note}</em></h1>
-          </div>
-          <div className="dex-heading__aside">
-            <p>Every write is simulated against live chain state before your wallet is asked to sign.</p>
-            <div className={`dex-onchain-status dex-onchain-status--${networkState}`} role="status">
-              <span />
-              <strong>{statusLabel}</strong>
-              <span>{dex.registryWiring.status === 'healthy' ? 'wiring confirmed' : dex.registryWiring.status === 'degraded' ? 'wiring mismatch' : 'reads pending'}</span>
-            </div>
-          </div>
-        </div>
+      <div className="dx-shell">
+        <header className="dx-hero">
+          <p className="dx-hero__eyebrow">
+            <span className={`dx-dot${networkState === 'live' ? ' dx-dot--ok' : ''}`} aria-hidden="true" />
+            SERIES9 DEX · MONAD CHAIN 143
+          </p>
+          <h1 id="dex-page-title">Trade<em> in gold.</em></h1>
+          <p className="dx-hero__note">
+            Every write is simulated against live chain state before your wallet signs.
+          </p>
+        </header>
 
-        <div className="dex-toolbar">
-          <span>DEX REGISTRY <code>{shortenAddress(DEX_CONTRACTS.registry)}</code></span>
-          <span>MAX LP FEE <strong>{formatPpmLimit(dex.registryWiring.maxLpFeeRatePpm)}</strong></span>
-          <button className="dex-refresh" type="button" onClick={dex.refresh} disabled={dex.loading}>
-            Refresh reads <span aria-hidden="true">/</span>
-          </button>
+        <div className="dx-poolbar">
+          <span className={`dx-dot${poolVerified ? ' dx-dot--ok' : ''}`} aria-hidden="true" />
+          <code className="dx-poolbar__address">
+            {activePoolAddress ? shortenAddress(activePoolAddress) : 'NO POOL LOADED'}
+          </code>
+          <span className="dx-poolbar__note">
+            {poolVerified
+              ? `verified · ${formatFeePpm(pool?.feePpm ?? null)} LP fee`
+              : activePoolAddress
+                ? 'not verified'
+                : 'load a pool to trade'}
+          </span>
+          <div className="dx-poolbar__tools">
+            <button
+              type="button"
+              className="dx-icon-button"
+              onClick={dex.refresh}
+              disabled={dex.loading}
+              aria-label="Refresh chain reads"
+            >
+              <RefreshIcon />
+            </button>
+            <button type="button" className="dx-button dx-button--ghost dx-button--small" onClick={() => setFinderOpen(true)}>
+              Change pool
+            </button>
+          </div>
         </div>
 
         {pageError && (
-          <div className="dex-error" role="alert">
-            <span><strong>Read or action notice.</strong> {pageError}</span>
-            <button type="button" onClick={handleClearErrors}>Clear</button>
+          <div className="dx-alert" role="alert">
+            <span>{pageError}</span>
+            <button type="button" onClick={handleClearErrors}>Dismiss</button>
           </div>
         )}
 
-        {tokenSelect !== null && pool?.valid && pool.token0 !== null && pool.token1 !== null && (
-          <TokenSelectDialog
-            side={tokenSelect}
-            tokens={[pool.token0, pool.token1]}
-            balances={[walletToken0?.balance ?? null, walletToken1?.balance ?? null]}
-            selectedIn={tokenIn}
-            selectedOut={tokenOut}
-            onSelect={(selected) => {
-              const lower = selected.address.toLowerCase();
-              if (pool.token0 && lower === pool.token0.address.toLowerCase()) setDirection('token0');
-              else if (pool.token1 && lower === pool.token1.address.toLowerCase()) setDirection('token1');
-              setTokenSelect(null);
-            }}
-            onClose={() => setTokenSelect(null)}
-          />
-        )}
-
-        <div className="dex-terminal-layout">
-          <section className="dex-terminal" aria-labelledby="dex-terminal-title">
-            <div className="dex-terminal__header">
-              <div>
-                <span className="panel-kicker">SPOT / ONCHAIN WRITES</span>
-                <h2 id="dex-terminal-title">Trading terminal</h2>
-              </div>
-              <div className="dex-header-tools">
-                <span className={`dex-terminal__state${poolReady ? ' dex-terminal__state--ready' : ''}`}>
-                  {poolReady ? 'READY' : poolVerified ? 'NO LIQUIDITY' : pool?.valid ? 'VERIFY WIRING' : 'POOL REQUIRED'}
-                </span>
-                <button
-                  type="button"
-                  className={`dex-gear${settingsOpen ? ' dex-gear--open' : ''}`}
-                  aria-label="Swap settings"
-                  aria-expanded={settingsOpen}
-                  onClick={() => setSettingsOpen((open) => !open)}
-                >
-                  <GearIcon />
-                </button>
-                <SwapSettings
-                  open={settingsOpen}
-                  slippage={slippage}
-                  onSlippageChange={(value) => { setSlippage(value); setActionError(null); }}
-                  onClose={() => setSettingsOpen(false)}
-                />
-              </div>
-            </div>
-
-            <nav className="dex-tabs dex-tabs--four" aria-label="DEX pages">
-              {([
-                ['swap', 'Swap', 'exact input'],
-                ['liquidity', 'Liquidity', 'add / remove'],
-                ['orders', 'Orders', 'limit book'],
-                ['create', 'Create pool', 'registry write'],
-              ] as Array<[DexTab, string, string]>).map(([value, label, note]) => (
+        <section className="dx-card" aria-label="DEX terminal">
+          <div className="dx-card__head">
+            <nav className="dx-tabs" aria-label="DEX pages">
+              {TABS.map(([value, label]) => (
                 <a
                   key={value}
-                  className={`dex-tab${tab === value ? ' dex-tab--active' : ''}`}
+                  className={`dx-tab${tab === value ? ' dx-tab--active' : ''}`}
                   href={dexHref(value)}
-                  id={`dex-tab-${value}`}
                   aria-current={tab === value ? 'page' : undefined}
                   onClick={(event) => {
                     event.preventDefault();
                     setTab(value);
                   }}
                 >
-                  <strong>{label}</strong>
-                  <small>{note}</small>
+                  {label}
                 </a>
               ))}
             </nav>
+            <div className="dx-head-tools">
+              <button
+                type="button"
+                className={`dx-icon-button${settingsOpen ? ' dx-icon-button--open' : ''}`}
+                aria-label="Swap settings"
+                aria-expanded={settingsOpen}
+                onClick={() => setSettingsOpen((open) => !open)}
+              >
+                <GearIcon />
+              </button>
+              <SwapSettings
+                open={settingsOpen}
+                slippage={slippage}
+                onSlippageChange={(value) => { setSlippage(value); setActionError(null); }}
+                onClose={() => setSettingsOpen(false)}
+              />
+            </div>
+          </div>
 
-            <div className="dex-terminal__body">
-              <div className="dex-pool-strip">
-                <span className={`dex-pool-strip__dot${poolVerified ? ' dex-pool-strip__dot--ok' : ''}`} aria-hidden="true" />
-                <code className="dex-pool-strip__address">
-                  {activePoolAddress ? shortenAddress(activePoolAddress) : 'NO POOL LOADED'}
-                </code>
-                <span className="dex-pool-strip__note">
-                  {poolVerified
-                    ? `registry verified / ${formatFeePpm(pool?.feePpm ?? null)} LP fee`
-                    : activePoolAddress
-                      ? 'not verified'
-                      : 'load a pool below to trade'}
-                </span>
-              </div>
+          <div className="dx-card__body">
+            {tab === 'swap' && (
+              emptyState || !pool?.valid || !registryReady
+                ? renderGate()
+                : !pool.hasLiquidity
+                  ? noLiquidityGate
+                  : (
+                    <form className="dx-form" onSubmit={handleSwap}>
+                      <TokenPanel
+                        label="You pay"
+                        inputLabel={`Amount of ${tokenSymbol(tokenIn)} to send`}
+                        value={amountIn}
+                        onValueChange={(value) => { setAmountIn(value); setActionError(null); }}
+                        token={tokenIn}
+                        meta={wallet.address ? `Balance ${formatTokenValue(walletToken?.balance ?? null, tokenIn)}` : 'Connect for balance'}
+                        metaActionLabel={walletToken?.balance != null && walletToken.balance > 0n ? 'MAX' : undefined}
+                        onMetaAction={handleMaxAmount}
+                        onTokenClick={() => setTokenSelect('in')}
+                        sub={swapSubIn}
+                        error={insufficientBalance || (amountIn.trim() !== '' && inputAmount === null)}
+                      />
 
-              <details className="dex-finder" open={emptyState}>
-                <summary>Change pool — paste an address or search the pair</summary>
-                <div className="dex-finder__manual">
-                  <label htmlFor="dex-pool-address">Active SpotPool</label>
-                  <div className="dex-pool-loader__row">
-                    <input
-                      id="dex-pool-address"
-                      value={poolAddressInput}
-                      onChange={(event) => {
-                        setPoolAddressInput(event.target.value);
-                        setActionError(null);
-                      }}
-                      placeholder="0x... deployed SpotPool"
-                      spellCheck="false"
-                      autoComplete="off"
-                    />
-                    <button className="dex-button dex-button--outline" type="button" onClick={handleLoadPool}>
-                      Load
-                    </button>
-                  </div>
-                </div>
-                <form className="dex-finder__form" onSubmit={handleFindPools}>
-                  <label>
-                    <span>Token A</span>
-                    <input
-                      value={finderTokenA}
-                      onChange={(event) => setFinderTokenA(event.target.value)}
-                      placeholder="0x..."
-                      spellCheck="false"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label>
-                    <span>Token B</span>
-                    <input
-                      value={finderTokenB}
-                      onChange={(event) => setFinderTokenB(event.target.value)}
-                      placeholder="0x..."
-                      spellCheck="false"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <button className="dex-button dex-button--outline" type="submit" disabled={finder.status === 'loading'}>
-                    {finder.status === 'loading' ? 'Reading registry...' : 'Search registry'}
-                  </button>
-                </form>
-                <div className="dex-finder__results" aria-live="polite">
-                  {finder.pairId && <p className="dex-finder__pair">PAIR ID <code>{`${finder.pairId.slice(0, 14)}...${finder.pairId.slice(-6)}`}</code></p>}
-                  {finder.error && <p className="dex-finder__error">{finder.error}</p>}
-                  {finder.status === 'done' && finder.pools.length === 0 && (
-                    <p className="dex-finder__empty">The registry holds no SpotPool for this pair yet. Create one on the Create pool page.</p>
-                  )}
-                  {finder.pools.map((address) => (
-                    <button
-                      key={address}
-                      className={`dex-finder__pool${normalizeDexAddress(activePoolAddress)?.toLowerCase() === address.toLowerCase() ? ' dex-finder__pool--active' : ''}`}
-                      type="button"
-                      onClick={() => selectPool(address)}
-                    >
-                      <code>{shortenAddress(address)}</code>
-                      <span>Load pool <span aria-hidden="true">-&gt;</span></span>
-                    </button>
-                  ))}
-                </div>
-              </details>
-
-              {tab === 'swap' && (
-                <form
-                  className="dex-tabpanel dex-swap-form"
-                  id="dex-panel-swap"
-                  onSubmit={handleSwap}
-                >
-                  {emptyState ? (
-                    <div className="dex-empty">
-                      <span className="panel-kicker">NO POOL LOADED</span>
-                      <h3>Load a SpotPool to start swapping.</h3>
-                      <p>Load an existing pool by address or pair search above, or deploy a new pair on the Create pool page.</p>
-                    </div>
-                  ) : poolGate ?? (!pool?.hasLiquidity ? (
-                    <div className="dex-pool-gate">
-                      <strong>Pool found, waiting for liquidity.</strong>
-                      <p>Both reserve fields must be nonzero before swaps price. Use the Liquidity page to seed the first position.</p>
-                      <button className="dex-button dex-button--outline dex-button--small" type="button" onClick={() => setTab('liquidity')}>
-                        Go to liquidity
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <div className={`dex-swap-panel${insufficientBalance ? ' dex-swap-panel--error' : ''}`}>
-                        <div className="dex-swap-panel__top">
-                          <span>You pay</span>
-                          <i>
-                            <span>{wallet.address ? `Balance ${formatTokenValue(walletToken?.balance ?? null, tokenIn)}` : 'Connect for balance'}</span>
-                            {walletToken?.balance != null && walletToken.balance > 0n && (
-                              <button type="button" onClick={handleMaxAmount}>MAX</button>
-                            )}
-                          </i>
-                        </div>
-                        <div className="dex-swap-panel__main">
-                          <input
-                            id="dex-amount-in"
-                            value={amountIn}
-                            onChange={(event) => {
-                              setAmountIn(event.target.value);
-                              setActionError(null);
-                            }}
-                            placeholder="0.00"
-                            inputMode="decimal"
-                            autoComplete="off"
-                            aria-label={`Amount of ${tokenSymbol(tokenIn)} to send`}
-                          />
-                          <button type="button" className="dex-token-pill" onClick={() => setTokenSelect('in')} aria-label={`Change the send token, currently ${tokenSymbol(tokenIn)}`}>
-                            <TokenBadge token={tokenIn} />
-                            <strong>{tokenSymbol(tokenIn)}</strong>
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
-                          </button>
-                        </div>
-                        <small className="dex-swap-panel__sub">
-                          {inputAmount === null && amountIn.trim() !== ''
-                            ? 'Use a decimal amount within the token precision.'
-                            : insufficientBalance
-                              ? 'Balance is short of this amount.'
-                              : tokenIn
-                                ? `${tokenIn.decimals ?? '?'} decimals / ERC20 approve then swapExactIn`
-                                : 'Token metadata pending'}
-                        </small>
-                      </div>
-
-                      <div className="dex-flip-row">
+                      <div className="dx-flip-row">
                         <button
                           type="button"
-                          className="dex-flip"
+                          className="dx-flip"
                           aria-label="Reverse swap direction"
                           onClick={() => setDirection((current) => current === 'token0' ? 'token1' : 'token0')}
                         >
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg>
+                          <FlipArrowIcon />
                         </button>
                       </div>
 
-                      <div className="dex-swap-panel dex-swap-panel--out">
-                        <div className="dex-swap-panel__top">
-                          <span>You receive</span>
-                          <i>
-                            {currentQuoteLoading && currentQuote === null
-                              ? 'quoting...'
-                              : minimumOut !== null
-                                ? `min ${formatTokenValue(minimumOut, tokenOut, 6)}`
-                                : ''}
-                          </i>
-                        </div>
-                        <div className="dex-swap-panel__main">
-                          <input
-                            readOnly
-                            value={currentQuote === null ? '' : formatUnits(currentQuote, tokenOut?.decimals ?? 18, 8)}
-                            placeholder={currentQuoteLoading && currentQuote === null ? 'Reading...' : '0.00'}
-                            aria-label={`Estimated ${tokenSymbol(tokenOut)} received`}
-                            onFocus={(event) => event.currentTarget.blur()}
-                          />
-                          <button type="button" className="dex-token-pill" onClick={() => setTokenSelect('out')} aria-label={`Change the receive token, currently ${tokenSymbol(tokenOut)}`}>
-                            <TokenBadge token={tokenOut} />
-                            <strong>{tokenSymbol(tokenOut)}</strong>
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
-                          </button>
-                        </div>
-                        <small className="dex-swap-panel__sub">
-                          {currentQuoteError ?? (currentQuote === null ? 'Enter an amount to fetch the live pool quote.' : 'Live SpotPool quote at 1e18 precision.')}
-                        </small>
-                      </div>
+                      <TokenPanel
+                        label="You receive"
+                        inputLabel={`Estimated ${tokenSymbol(tokenOut)} received`}
+                        value={currentQuote === null ? '' : formatUnits(currentQuote, tokenOut?.decimals ?? 18, 8)}
+                        readOnly
+                        loading={currentQuoteLoading && currentQuote === null}
+                        token={tokenOut}
+                        meta={minimumOut !== null ? `Min ${formatTokenValue(minimumOut, tokenOut, 6)}` : undefined}
+                        onTokenClick={() => setTokenSelect('out')}
+                        sub={swapSubOut}
+                      />
 
                       {swapRateValue !== EMPTY && (
-                        <button type="button" className="dex-rate" onClick={() => setRateInverted((value) => !value)} aria-label="Toggle rate direction">
+                        <button type="button" className="dx-rate" onClick={() => setRateInverted((value) => !value)} aria-label="Toggle rate direction">
                           <span>1 {tokenSymbol(swapRateBase)} =</span>
                           <strong>{swapRateValue}</strong>
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg>
+                          <RepeatIcon />
                         </button>
                       )}
 
-                      <details className="dex-swap-details">
+                      <details className="dx-details">
                         <summary>
                           Swap details
                           <span>{slippage}% max slippage</span>
@@ -1805,281 +1934,268 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                         </dl>
                       </details>
 
-                      <div className="dex-action-block">
-                        <button className="dex-button dex-button--gold dex-button--full dex-cta" type="submit" disabled={walletBusy || !swapCtaReady}>
-                          {tradeButtonLabel}
-                        </button>
-                        <p className="dex-trade-note">Every swap is dry-run against the live allowance and balance before signing. Native MON must be wrapped first; this terminal trades ERC20 pairs only.</p>
-                      </div>
-                    </>
-                  ))}
-                </form>
-              )}
+                      <button className="dx-cta" type="submit" disabled={walletBusy || !swapCtaReady}>
+                        {tradeButtonLabel}
+                      </button>
+                      <p className="dx-note">
+                        Swaps are dry-run against live allowance and balance before signing. Native MON must be wrapped first — this market trades ERC20 pairs only.
+                      </p>
+                    </form>
+                  )
+            )}
 
-              {tab === 'liquidity' && (
-                <div className="dex-tabpanel" id="dex-panel-liquidity">
-                  {emptyState ? (
-                    <div className="dex-empty">
-                      <span className="panel-kicker">NO POOL LOADED</span>
-                      <h3>Select a pool before adding liquidity.</h3>
-                      <p>Load a SpotPool above, or create one on the Create pool page and it will be selected for you automatically.</p>
+            {tab === 'liquidity' && (
+              emptyState || !pool?.valid || !registryReady
+                ? renderGate()
+                : (
+                  <>
+                    <div className="dx-position">
+                      <div>
+                        <span>Your LP shares</span>
+                        <strong>{wallet.address ? (walletShares === null ? EMPTY : walletShares.toString()) : 'connect wallet'}</strong>
+                        <small>{shareOfPoolPpm === null ? 'share of pool pending' : `${formatUnits(shareOfPoolPpm, 4, 4)}% of pool`}</small>
+                      </div>
+                      <div>
+                        <span>Pool reserves</span>
+                        <strong>
+                          {formatTokenValue(pool?.reserves?.reserve0 ?? null, pool?.token0 ?? null)} / {formatTokenValue(pool?.reserves?.reserve1 ?? null, pool?.token1 ?? null)}
+                        </strong>
+                        <small>{tokenSymbol(pool?.token0 ?? null)} / {tokenSymbol(pool?.token1 ?? null)}</small>
+                      </div>
                     </div>
-                  ) : poolGate ?? (
-                    <>
-                      <div className="dex-position-card">
-                        <div>
-                          <span>YOUR LP SHARES</span>
-                          <strong>{wallet.address ? (walletShares === null ? EMPTY : walletShares.toString()) : 'connect wallet'}</strong>
-                          <small>{shareOfPoolPpm === null ? 'share of pool pending' : `${formatUnits(shareOfPoolPpm, 4, 4)}% of pool`}</small>
+
+                    <form className="dx-form" onSubmit={handleAddLiquidity}>
+                      {(['token0', 'token1'] as const).map((side) => {
+                        const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
+                        const held = side === 'token0' ? walletToken0 : walletToken1;
+                        const value = side === 'token0' ? addAmount0 : addAmount1;
+                        const setValue = side === 'token0' ? setAddAmount0 : setAddAmount1;
+                        const parsed = side === 'token0' ? amount0In : amount1In;
+                        const short = side === 'token0' ? insufficient0 : insufficient1;
+                        return (
+                          <AmountField
+                            key={side}
+                            id={`dx-deposit-${side}`}
+                            title={`Deposit ${tokenSymbol(token)}`}
+                            hint={wallet.address ? `Balance ${formatTokenValue(held?.balance ?? null, token)}` : 'Connect wallet'}
+                            value={value}
+                            onChange={(next) => { setValue(next); setActionError(null); }}
+                            symbol={tokenSymbol(token)}
+                            actionLabel="MAX"
+                            onAction={() => handleMaxDeposit(side)}
+                            actionDisabled={held?.balance == null}
+                            note={
+                              value.trim() !== '' && parsed === null
+                                ? 'Use a decimal amount within the token precision.'
+                                : short
+                                  ? 'Balance is short of this amount.'
+                                  : poolRatioReady
+                                    ? 'Deposits outside the reserve ratio are refunded by the pool.'
+                                    : 'First deposit sets the opening price of the pool.'
+                            }
+                          />
+                        );
+                      })}
+                      {poolRatioReady && (
+                        <div className="dx-link-row">
+                          <button type="button" onClick={() => handleMatchRatio('token1')} disabled={amount0In === null}>
+                            Match token1 ↔ token0
+                          </button>
+                          <button type="button" onClick={() => handleMatchRatio('token0')} disabled={amount1In === null}>
+                            Match token0 ↔ token1
+                          </button>
                         </div>
-                        <div>
-                          <span>POOL RESERVES</span>
-                          <strong>{formatTokenValue(pool?.reserves?.reserve0 ?? null, pool?.token0 ?? null)} / {formatTokenValue(pool?.reserves?.reserve1 ?? null, pool?.token1 ?? null)}</strong>
-                          <small>{tokenSymbol(pool?.token0 ?? null)} / {tokenSymbol(pool?.token1 ?? null)}</small>
-                        </div>
-                      </div>
+                      )}
 
-                      <form className="dex-liquidity-form" onSubmit={handleAddLiquidity}>
-                        <h3 className="dex-subhead">Add liquidity</h3>
-                        {(['token0', 'token1'] as const).map((side) => {
-                          const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
-                          const held = side === 'token0' ? walletToken0 : walletToken1;
-                          const value = side === 'token0' ? addAmount0 : addAmount1;
-                          const setValue = side === 'token0' ? setAddAmount0 : setAddAmount1;
-                          const parsed = side === 'token0' ? amount0In : amount1In;
-                          const short = side === 'token0' ? insufficient0 : insufficient1;
-                          return (
-                            <label className="dex-amount-field" key={side} htmlFor={`dex-deposit-${side}`}>
-                              <span>
-                                <b>Deposit {tokenSymbol(token)}</b>
-                                <i>Balance {wallet.address ? formatTokenValue(held?.balance ?? null, token) : 'connect wallet'}</i>
-                              </span>
-                              <div>
-                                <input
-                                  id={`dex-deposit-${side}`}
-                                  value={value}
-                                  onChange={(event) => {
-                                    setValue(event.target.value);
-                                    setActionError(null);
-                                  }}
-                                  placeholder="0.00"
-                                  inputMode="decimal"
-                                  autoComplete="off"
-                                />
-                                <strong>{tokenSymbol(token)}</strong>
-                                <button type="button" onClick={() => handleMaxDeposit(side)} disabled={held?.balance == null}>MAX</button>
-                              </div>
-                              <small>
-                                {value && parsed === null
-                                  ? 'Use a decimal amount within the token precision.'
-                                  : short
-                                    ? 'Balance is short of this amount.'
-                                    : poolRatioReady
-                                      ? 'Deposits outside the reserve ratio are refunded by the pool.'
-                                      : 'First deposit sets the opening price of the pool.'}
-                              </small>
-                              {poolRatioReady && (
-                                <button
-                                  className="dex-ratio-button"
-                                  type="button"
-                                  onClick={() => handleMatchRatio(side)}
-                                  disabled={parsed === null}
-                                >
-                                  Match the other side to this amount
-                                </button>
-                              )}
-                            </label>
-                          );
-                        })}
-
-                        <div className="dex-trade-settings">
-                          <label htmlFor="dex-liquidity-slippage">Tolerance</label>
-                          <select id="dex-liquidity-slippage" value={liquiditySlippage} onChange={(event) => setLiquiditySlippage(event.target.value)}>
-                            <option value="0.1">0.1%</option>
-                            <option value="0.5">0.5%</option>
-                            <option value="1">1%</option>
-                            <option value="2">2%</option>
-                            <option value="5">5%</option>
-                          </select>
-                          <span>
-                            {!wallet.address
-                              ? 'Connect to approve both tokens'
-                              : approvalRequired0
-                                ? `${tokenSymbol(pool?.token0 ?? null)} approval required`
-                                : approvalRequired1
-                                  ? `${tokenSymbol(pool?.token1 ?? null)} approval required`
-                                  : 'Both allowances ready'}
-                          </span>
-                        </div>
-
-                        <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!addLiquidityReady || walletBusy}>
-                          {addLiquidityButtonLabel} <span aria-hidden="true">-&gt;</span>
-                        </button>
-                      </form>
-
-                      <form className="dex-liquidity-form dex-liquidity-form--remove" onSubmit={handleRemoveLiquidity}>
-                        <h3 className="dex-subhead">Remove liquidity</h3>
-                        <div className="dex-percent-row" role="group" aria-label="Share of position to withdraw">
-                          {REMOVE_PERCENTS.map((percent) => (
+                      <div className="dx-setting-row">
+                        <span>Tolerance</span>
+                        <div className="dx-chip-row">
+                          {TOLERANCE_PRESETS.map((preset) => (
                             <button
-                              key={percent}
-                              className={`dex-percent${removePercent === percent ? ' dex-percent--active' : ''}`}
+                              key={preset}
                               type="button"
-                              onClick={() => setRemovePercent(percent)}
+                              className={`dx-chip${liquidityTolerance === preset ? ' dx-chip--active' : ''}`}
+                              onClick={() => setLiquidityTolerance(preset)}
                             >
-                              {percent}%
+                              {preset}%
                             </button>
                           ))}
                         </div>
-                        <dl className="dex-redeem-preview">
-                          <div><dt>Shares burned</dt><dd>{removeShares === null ? EMPTY : removeShares.toString()}</dd></div>
-                          <div><dt>{tokenSymbol(pool?.token0 ?? null)} returned</dt><dd>{formatTokenValue(redeemable?.amount0 ?? null, pool?.token0 ?? null, 6)}</dd></div>
-                          <div><dt>{tokenSymbol(pool?.token1 ?? null)} returned</dt><dd>{formatTokenValue(redeemable?.amount1 ?? null, pool?.token1 ?? null, 6)}</dd></div>
-                        </dl>
-                        <button
-                          className="dex-button dex-button--outline dex-button--full"
-                          type="submit"
-                          disabled={removeShares === null || removeShares === 0n || walletBusy}
-                        >
-                          {busyAction ?? (walletShares ? `Withdraw ${removePercent}%` : 'No position to withdraw')} <span aria-hidden="true">-&gt;</span>
-                        </button>
-                      </form>
-                    </>
-                  )}
-                </div>
-              )}
+                        <small>
+                          {!wallet.address
+                            ? 'Connect to approve both tokens'
+                            : approvalRequired0
+                              ? `${tokenSymbol(pool?.token0 ?? null)} approval required`
+                              : approvalRequired1
+                                ? `${tokenSymbol(pool?.token1 ?? null)} approval required`
+                                : 'Both allowances ready'}
+                        </small>
+                      </div>
 
-              {tab === 'orders' && (
-                <div className="dex-tabpanel" id="dex-panel-orders">
-                  {emptyState ? (
-                    <div className="dex-empty">
-                      <span className="panel-kicker">NO POOL LOADED</span>
-                      <h3>Load a pool to open its orderbook.</h3>
-                      <p>Orderbook levels are keyed by the pair id, so load or create a SpotPool first and its book comes with it.</p>
+                      <button className="dx-cta" type="submit" disabled={!addLiquidityReady || walletBusy}>
+                        {addLiquidityButtonLabel}
+                      </button>
+                    </form>
+
+                    <hr className="dx-divider" />
+
+                    <form className="dx-form" onSubmit={handleRemoveLiquidity}>
+                      <div className="dx-subhead">
+                        <h3>Remove liquidity</h3>
+                        <span>{walletShares ? `position ${walletShares.toString()} shares` : 'no position'}</span>
+                      </div>
+                      <div className="dx-chip-row" role="group" aria-label="Share of position to withdraw">
+                        {REMOVE_PERCENTS.map((percent) => (
+                          <button
+                            key={percent}
+                            className={`dx-chip${removePercent === percent ? ' dx-chip--active' : ''}`}
+                            type="button"
+                            onClick={() => setRemovePercent(percent)}
+                          >
+                            {percent}%
+                          </button>
+                        ))}
+                      </div>
+                      <dl className="dx-summary">
+                        <div><dt>Shares burned</dt><dd>{removeShares === null ? EMPTY : removeShares.toString()}</dd></div>
+                        <div><dt>{tokenSymbol(pool?.token0 ?? null)} returned</dt><dd>{formatTokenValue(redeemable?.amount0 ?? null, pool?.token0 ?? null, 6)}</dd></div>
+                        <div><dt>{tokenSymbol(pool?.token1 ?? null)} returned</dt><dd>{formatTokenValue(redeemable?.amount1 ?? null, pool?.token1 ?? null, 6)}</dd></div>
+                      </dl>
+                      <button
+                        className="dx-cta dx-cta--ghost"
+                        type="submit"
+                        disabled={removeShares === null || removeShares === 0n || walletBusy}
+                      >
+                        {busyAction ?? (walletShares ? `Withdraw ${removePercent}%` : 'No position to withdraw')}
+                      </button>
+                    </form>
+                  </>
+                )
+            )}
+
+            {tab === 'orders' && (
+              emptyState || !pool?.valid || !registryReady
+                ? renderGate()
+                : !bookInitialized
+                  ? (
+                    <div className="dx-gate">
+                      <span className="dx-gate__glyph" aria-hidden="true">✦</span>
+                      <h3>No book initialised</h3>
+                      <p>DexRegistry opens the Orderbook when it creates the pool. If this pool predates that wiring, its book cannot take orders.</p>
                     </div>
-                  ) : poolGate ?? (!bookInitialized ? (
-                    <div className="dex-pool-gate">
-                      <strong>No book is initialised for this pair.</strong>
-                      <p>DexRegistry opens the Orderbook book when it creates the pool. If this pool predates that wiring, its book cannot take orders.</p>
-                    </div>
-                  ) : (
+                  )
+                  : (
                     <>
-                      <form className="dex-order-form" onSubmit={handlePlaceOrder}>
-                        <h3 className="dex-subhead">Limit order</h3>
-                        <div className="dex-side-toggle" role="group" aria-label="Order side">
+                      <form className="dx-form" onSubmit={handlePlaceOrder}>
+                        <div className="dx-side-toggle" role="group" aria-label="Order side">
                           {(['buy', 'sell'] as const).map((side) => (
                             <button
                               key={side}
-                              className={`dex-side${orderSide === side ? ` dex-side--active dex-side--${side}` : ''}`}
+                              className={`dx-side${orderSide === side ? ` dx-side--active dx-side--${side}` : ''}`}
                               type="button"
                               onClick={() => setOrderSide(side)}
                             >
-                              <strong>{side === 'buy' ? 'BUY' : 'SELL'}</strong>
+                              <strong>{side === 'buy' ? 'Buy' : 'Sell'}</strong>
                               <small>{side === 'buy' ? `pay ${tokenSymbol(quoteToken)}` : `pay ${tokenSymbol(baseToken)}`}</small>
                             </button>
                           ))}
                         </div>
 
-                        <label className="dex-amount-field" htmlFor="dex-order-price">
-                          <span><b>Limit price</b><i>{tokenSymbol(quoteToken)} per {tokenSymbol(baseToken)}</i></span>
-                          <div>
-                            <input
-                              id="dex-order-price"
-                              value={orderPrice}
-                              onChange={(event) => { setOrderPrice(event.target.value); setActionError(null); }}
-                              placeholder="0.00"
-                              inputMode="decimal"
-                              autoComplete="off"
-                            />
-                            <strong>{tokenSymbol(quoteToken)}</strong>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const reference = pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null;
-                                if (reference === null || baseToken?.decimals == null || quoteToken?.decimals == null) return;
-                                setOrderPrice(formatUnits(reference * 10n ** BigInt(baseToken.decimals) / 10n ** BigInt(quoteToken.decimals), 18, 12));
-                              }}
-                              disabled={(pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null) === null}
-                            >
-                              SPOT
-                            </button>
+                        <AmountField
+                          id="dx-order-price"
+                          title="Limit price"
+                          hint={`${tokenSymbol(quoteToken)} per ${tokenSymbol(baseToken)}`}
+                          value={orderPrice}
+                          onChange={(next) => { setOrderPrice(next); setActionError(null); }}
+                          symbol={tokenSymbol(quoteToken)}
+                          actionLabel="SPOT"
+                          actionDisabled={(pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null) === null}
+                          onAction={() => {
+                            const reference = pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null;
+                            if (reference === null || baseToken?.decimals == null || quoteToken?.decimals == null) return;
+                            setOrderPrice(formatUnits(reference * 10n ** BigInt(baseToken.decimals) / 10n ** BigInt(quoteToken.decimals), 18, 12));
+                          }}
+                          note={
+                            orderPrice && orderPriceX18 === null
+                              ? 'Use a decimal price the token pair can represent.'
+                              : `Tick ${dex.orderbook?.bookConfig?.tickSize.toString() ?? EMPTY} · prices stored at 1e18 precision.`
+                          }
+                        />
+
+                        <AmountField
+                          id="dx-order-amount"
+                          title="Amount"
+                          hint={wallet.address ? `Balance ${formatTokenValue(walletToken0?.balance ?? null, baseToken)}` : 'Connect wallet'}
+                          value={orderAmount}
+                          onChange={(next) => { setOrderAmount(next); setActionError(null); }}
+                          symbol={tokenSymbol(baseToken)}
+                          actionLabel="MAX"
+                          actionDisabled={orderSide !== 'sell' || walletToken0?.balance == null}
+                          onAction={() => {
+                            if (walletToken0?.balance == null || baseToken?.decimals == null) return;
+                            setOrderAmount(formatUnits(walletToken0.balance, baseToken.decimals, baseToken.decimals));
+                          }}
+                          note={`Always denominated in ${tokenSymbol(baseToken)}, the pair's base token.`}
+                        />
+
+                        <div className="dx-setting-row">
+                          <span>Good for</span>
+                          <div className="dx-chip-row">
+                            {EXPIRY_PRESETS.map((preset) => (
+                              <button
+                                key={preset.seconds}
+                                type="button"
+                                className={`dx-chip${orderExpiry === preset.seconds ? ' dx-chip--active' : ''}`}
+                                onClick={() => setOrderExpiry(preset.seconds)}
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
                           </div>
                           <small>
-                            {orderPrice && orderPriceX18 === null
-                              ? 'Use a decimal price the token pair can represent.'
-                              : `Tick ${dex.orderbook?.bookConfig?.tickSize.toString() ?? EMPTY} / prices are stored at 1e18 precision.`}
+                            {escrowApprovalRequired
+                              ? `${tokenSymbol(escrowToken)} approval required`
+                              : wallet.address
+                                ? 'Orderbook allowance ready'
+                                : 'Connect to escrow the order'}
                           </small>
-                        </label>
-
-                        <label className="dex-amount-field" htmlFor="dex-order-amount">
-                          <span>
-                            <b>Amount</b>
-                            <i>Balance {wallet.address ? formatTokenValue(walletToken0?.balance ?? null, baseToken) : 'connect wallet'}</i>
-                          </span>
-                          <div>
-                            <input
-                              id="dex-order-amount"
-                              value={orderAmount}
-                              onChange={(event) => { setOrderAmount(event.target.value); setActionError(null); }}
-                              placeholder="0.00"
-                              inputMode="decimal"
-                              autoComplete="off"
-                            />
-                            <strong>{tokenSymbol(baseToken)}</strong>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (walletToken0?.balance == null || baseToken?.decimals == null) return;
-                                setOrderAmount(formatUnits(walletToken0.balance, baseToken.decimals, baseToken.decimals));
-                              }}
-                              disabled={orderSide !== 'sell' || walletToken0?.balance == null}
-                            >
-                              MAX
-                            </button>
-                          </div>
-                          <small>Always denominated in {tokenSymbol(baseToken)}, the pair's base token.</small>
-                        </label>
-
-                        <div className="dex-trade-settings">
-                          <label htmlFor="dex-order-expiry">Good for</label>
-                          <select id="dex-order-expiry" value={orderExpiry} onChange={(event) => setOrderExpiry(event.target.value)}>
-                            {EXPIRY_PRESETS.map((preset) => (
-                              <option key={preset.seconds} value={preset.seconds}>{preset.label}</option>
-                            ))}
-                          </select>
-                          <span>{escrowApprovalRequired ? `${tokenSymbol(escrowToken)} approval required` : wallet.address ? 'Orderbook allowance ready' : 'Connect to escrow the order'}</span>
                         </div>
 
-                        <dl className="dex-redeem-preview">
+                        <dl className="dx-summary">
                           <div><dt>Escrowed now</dt><dd>{formatTokenValue(orderEscrowAmount, escrowToken, 6)} {tokenSymbol(escrowToken)}</dd></div>
                           <div><dt>You receive if filled</dt><dd>{formatTokenValue(orderProceeds, proceedsToken, 6)} {tokenSymbol(proceedsToken)}</dd></div>
                           <div><dt>Expires</dt><dd>{orderExpiryAt === null ? EMPTY : formatExpiry(orderExpiryAt)}</dd></div>
                         </dl>
 
-                        <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!orderReady || walletBusy}>
-                          {orderButtonLabel} <span aria-hidden="true">-&gt;</span>
+                        <button className="dx-cta" type="submit" disabled={!orderReady || walletBusy}>
+                          {orderButtonLabel}
                         </button>
-                        <p className="dex-trade-note">
-                          Orders rest on the shared <code>Orderbook</code>; they do not cross each other at placement. A SpotPool swap is what consumes them, so a resting bid fills when the pool trades through your price.
+                        <p className="dx-note">
+                          Orders rest on the shared Orderbook and are consumed by SpotPool swaps — a bid fills when the pool trades through your price.
                         </p>
                       </form>
 
-                      <section className="dex-order-list" aria-label="Your orders on this pair">
-                        <h3 className="dex-subhead">Your orders</h3>
+                      <hr className="dx-divider" />
+
+                      <section className="dx-orders" aria-label="Your orders on this pair">
+                        <div className="dx-subhead">
+                          <h3>Your orders</h3>
+                          <span>{openOrders.length} resting</span>
+                        </div>
                         {!wallet.address ? (
-                          <p className="dex-panel-empty">Connect a wallet to list the orders it has resting on this pair.</p>
+                          <p className="dx-empty-line">Connect a wallet to list its resting orders.</p>
                         ) : dex.myOrders.length === 0 ? (
-                          <p className="dex-panel-empty">No orders from this wallet in the most recent order ids on this pair.</p>
+                          <p className="dx-empty-line">No orders from this wallet on this pair yet.</p>
                         ) : (
                           [...openOrders, ...closedOrders].map((entry) => {
                             const status = orderStatusLabel(entry, nowSeconds);
                             const cancellable = status === 'OPEN' || status === 'PARTIAL' || status === 'EXPIRED';
                             return (
-                              <article className={`dex-order-row dex-order-row--${entry.order.side === 0 ? 'buy' : 'sell'}`} key={entry.id.toString()}>
-                                <div className="dex-order-row__head">
+                              <article className={`dx-order${entry.order.side === 0 ? ' dx-order--buy' : ' dx-order--sell'}`} key={entry.id.toString()}>
+                                <div className="dx-order__head">
                                   <strong>{entry.order.side === 0 ? 'BUY' : 'SELL'}</strong>
                                   <code>#{entry.id.toString()}</code>
-                                  <span className={`dex-order-status dex-order-status--${status.toLowerCase()}`}>{status}</span>
+                                  <span className={`dx-order-status dx-order-status--${status.toLowerCase()}`}>{status}</span>
                                 </div>
                                 <dl>
                                   <div><dt>Price</dt><dd>{formatPriceX18(entry.order.priceX18, baseToken, quoteToken)}</dd></div>
@@ -2088,13 +2204,13 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                                   <div><dt>Expires</dt><dd>{formatExpiry(entry.order.expiry)}</dd></div>
                                 </dl>
                                 <button
-                                  className="dex-button dex-button--outline dex-button--small"
+                                  className="dx-button dx-button--ghost dx-button--small"
                                   type="button"
                                   data-order-id={entry.id.toString()}
                                   onClick={handleCancelOrder}
                                   disabled={!cancellable || walletBusy}
                                 >
-                                  {cancellable ? 'Cancel and refund escrow' : 'Closed'}
+                                  {cancellable ? 'Cancel & refund' : 'Closed'}
                                 </button>
                               </article>
                             );
@@ -2102,185 +2218,193 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                         )}
                       </section>
                     </>
-                  ))}
-                </div>
-              )}
+                  )
+            )}
 
-              {tab === 'create' && (
-                <form
-                  className="dex-tabpanel"
-                  id="dex-panel-create"
-                  onSubmit={handleCreatePool}
-                >
-                  <h3 className="dex-subhead">Create a SpotPool</h3>
-                  <p className="dex-trade-note">
-                    <code>DexRegistry.createSpotPool</code> is permissionless: it deploys the pool through SpotPoolFactory and opens the matching Orderbook book in the same transaction. Token order does not matter, the registry sorts the pair.
-                  </p>
+            {tab === 'create' && (
+              <form className="dx-form" onSubmit={handleCreatePool}>
+                <p className="dx-note dx-note--lead">
+                  <code>DexRegistry.createSpotPool</code> deploys the pool through SpotPoolFactory and opens the matching Orderbook in one transaction. The registry sorts the pair.
+                </p>
 
-                  <label className="dex-field">
-                    <span>Token A</span>
+                <label className="dx-field dx-field--address">
+                  <span className="dx-field__top"><b>Token A</b><i>ERC20 on Monad</i></span>
+                  <div className="dx-field__row">
                     <input
                       value={createTokenA}
                       onChange={(event) => { setCreateTokenA(event.target.value); setActionError(null); }}
-                      placeholder="0x... ERC20"
+                      placeholder="0x…"
                       spellCheck="false"
                       autoComplete="off"
                     />
-                    <small>{createTokenA && createTokenAAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20 on Monad.'}</small>
-                  </label>
-                  <label className="dex-field">
-                    <span>Token B</span>
+                  </div>
+                  <small>{createTokenA && createTokenAAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
+                </label>
+                <label className="dx-field dx-field--address">
+                  <span className="dx-field__top"><b>Token B</b><i>must differ from A</i></span>
+                  <div className="dx-field__row">
                     <input
                       value={createTokenB}
                       onChange={(event) => { setCreateTokenB(event.target.value); setActionError(null); }}
-                      placeholder="0x... ERC20"
+                      placeholder="0x…"
                       spellCheck="false"
                       autoComplete="off"
                     />
-                    <small>{createTokenB && createTokenBAddress === null ? 'Not a valid 20-byte address.' : 'Must differ from token A.'}</small>
-                  </label>
-
-                  <div className="dex-fee-picker" role="group" aria-label="LP fee tier">
-                    {FEE_PRESETS.map((preset) => (
-                      <button
-                        key={preset.ppm}
-                        className={`dex-fee-option${createFeePpm === preset.ppm ? ' dex-fee-option--active' : ''}`}
-                        type="button"
-                        onClick={() => setCreateFeePpm(preset.ppm)}
-                      >
-                        <strong>{preset.label}</strong>
-                        <small>{preset.note}</small>
-                      </button>
-                    ))}
                   </div>
+                  <small>{createTokenB && createTokenBAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
+                </label>
 
-                  <div className="dex-field-row">
-                    <label className="dex-field">
-                      <span>LP fee (ppm)</span>
+                <div className="dx-fee-picker" role="group" aria-label="LP fee tier">
+                  {FEE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.ppm}
+                      className={`dx-fee${createFeePpm === preset.ppm ? ' dx-fee--active' : ''}`}
+                      type="button"
+                      onClick={() => setCreateFeePpm(preset.ppm)}
+                    >
+                      <strong>{preset.label}</strong>
+                      <small>{preset.note}</small>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="dx-field-grid">
+                  <label className="dx-field">
+                    <span className="dx-field__top"><b>LP fee (ppm)</b></span>
+                    <div className="dx-field__row">
                       <input
                         value={createFeePpm}
                         onChange={(event) => { setCreateFeePpm(event.target.value); setActionError(null); }}
                         inputMode="numeric"
                         autoComplete="off"
                       />
-                      <small>
-                        {createFee === null
-                          ? 'Whole ppm value only.'
-                          : !createFeeWithinLimit
-                            ? `Above the registry ceiling of ${formatPpmLimit(dex.registryWiring.maxLpFeeRatePpm)}.`
-                            : `${formatFeePpm(createFee)} per swap, fixed at creation.`}
-                      </small>
-                    </label>
-                    <label className="dex-field">
-                      <span>Orderbook tick size</span>
+                    </div>
+                    <small>
+                      {createFee === null
+                        ? 'Whole ppm value only.'
+                        : !createFeeWithinLimit
+                          ? `Above the registry ceiling of ${formatPpmLimit(dex.registryWiring.maxLpFeeRatePpm)}.`
+                          : `${formatFeePpm(createFee)} per swap, fixed at creation.`}
+                    </small>
+                  </label>
+                  <label className="dx-field">
+                    <span className="dx-field__top"><b>Book tick size</b></span>
+                    <div className="dx-field__row">
                       <input
                         value={createTickSize}
                         onChange={(event) => { setCreateTickSize(event.target.value); setActionError(null); }}
                         inputMode="numeric"
                         autoComplete="off"
                       />
-                      <small>{createTick === null || createTick === 0n ? 'Must be a whole number above zero.' : 'Minimum price increment on the shared book.'}</small>
-                    </label>
-                  </div>
+                    </div>
+                    <small>{createTick === null || createTick === 0n ? 'Whole number above zero.' : 'Minimum price increment on the shared book.'}</small>
+                  </label>
+                </div>
 
-                  <div className="dex-create-summary">
-                    <span>DERIVED PAIR ID</span>
-                    <code>{createPairId ? `${createPairId.slice(0, 18)}...${createPairId.slice(-8)}` : EMPTY}</code>
-                    <small>keccak256 of the sorted token pair, the same key DexRegistry stores.</small>
-                  </div>
+                <div className="dx-pairbox">
+                  <span>DERIVED PAIR ID</span>
+                  <code>{createPairId ? `${createPairId.slice(0, 16)}…${createPairId.slice(-8)}` : EMPTY}</code>
+                  <small>keccak256 of the sorted token pair — the key DexRegistry stores.</small>
+                </div>
 
-                  <button className="dex-button dex-button--gold dex-button--full" type="submit" disabled={!createReady || walletBusy}>
-                    {createButtonLabel} <span aria-hidden="true">-&gt;</span>
-                  </button>
-                  <p className="dex-trade-note">The pool is simulated against the live registry first, so a duplicate pair, a fee above the ceiling, or a zero tick is reported before your wallet opens.</p>
-                </form>
-              )}
+                <button className="dx-cta" type="submit" disabled={!createReady || walletBusy}>
+                  {createButtonLabel}
+                </button>
+                <p className="dx-note">
+                  Creation is simulated against the live registry first — duplicate pairs, fees above the ceiling, or zero ticks are reported before your wallet opens.
+                </p>
+              </form>
+            )}
+          </div>
+
+          {unresolvedTransaction && (
+            <div className="dx-unresolved" role="alert">
+              <span>
+                Receipt uncertain for <code>{formatHash(unresolvedTransaction.hash)}</code>. Verify it in your wallet or explorer before continuing.
+              </span>
+              <button type="button" onClick={handleAcknowledgeUnresolvedTransaction}>I verified it</button>
             </div>
+          )}
+        </section>
 
-            {unresolvedTransaction && (
-              <div className="dex-unresolved" role="alert">
-                <span>Receipt status is uncertain for <code>{formatHash(unresolvedTransaction.hash)}</code>. Verify it in your wallet or explorer before continuing.</span>
-                <button className="dex-button dex-button--small" type="button" onClick={handleAcknowledgeUnresolvedTransaction}>I verified it</button>
-              </div>
-            )}
-          </section>
+        <section className="dx-stats" aria-label="Live pool readings">
+          {pool?.valid && registryReady ? (
+            <>
+              <MetricCard label="RESERVE 0" value={formatTokenValue(pool.reserves?.reserve0 ?? null, pool.token0)} note={tokenSymbol(pool.token0)} />
+              <MetricCard label="RESERVE 1" value={formatTokenValue(pool.reserves?.reserve1 ?? null, pool.token1)} note={tokenSymbol(pool.token1)} />
+              <MetricCard label="SPOT PRICE" value={formatPriceX18(pool.spotPriceX18 ?? pool.reservePriceX18, pool.token0, pool.token1)} note="token1 per token0" />
+              <MetricCard label="LP FEE" value={formatFeePpm(pool.feePpm)} note="fixed at creation" />
+              <MetricCard label="TOTAL SHARES" value={pool.totalShares === null ? EMPTY : pool.totalShares.toString()} note="LP supply" />
+              <MetricCard label="BEST BID" value={formatLevelPrice(dex.orderbook?.bestBid?.priceX18 ?? null, pool)} note={`${formatTokenValue(dex.orderbook?.bestBid?.totalBase ?? null, pool.token0)} ${tokenSymbol(pool.token0)}`} />
+              <MetricCard label="BEST ASK" value={formatLevelPrice(dex.orderbook?.bestAsk?.priceX18 ?? null, pool)} note={`${formatTokenValue(dex.orderbook?.bestAsk?.totalBase ?? null, pool.token0)} ${tokenSymbol(pool.token0)}`} />
+              <MetricCard label="BOOK" value={dex.orderbook?.bookConfig?.initialized ? 'INITIALIZED' : dex.orderbook?.bookConfig ? 'EMPTY' : 'UNAVAILABLE'} note={dex.orderbook?.bookConfig?.tickSize === undefined ? 'config undecoded' : `tick ${dex.orderbook?.bookConfig?.tickSize.toString() ?? EMPTY}`} />
+            </>
+          ) : (
+            <div className="dx-stats__quiet">
+              <span>POOL TELEMETRY</span>
+              <p>Live readings appear once a verified SpotPool, token metadata, pair ID, and reserve tuple are read from Monad.</p>
+            </div>
+          )}
+        </section>
 
-          <aside className="dex-rail" aria-label="DEX live readings">
-            {pool?.valid ? (
-              <section className="dex-telemetry-panel" aria-labelledby="dex-pool-readings-title">
-                <div className="dex-panel-heading">
-                  <div><span className="panel-kicker">POOL TELEMETRY</span><h2 id="dex-pool-readings-title">Live pool</h2></div>
-                  <code>{shortenAddress(pool.address)}</code>
-                </div>
-                <div className="dex-metric-grid">
-                  <PoolMetric label="RESERVE 0" value={formatTokenValue(pool.reserves?.reserve0 ?? null, pool.token0)} note={tokenSymbol(pool.token0)} />
-                  <PoolMetric label="RESERVE 1" value={formatTokenValue(pool.reserves?.reserve1 ?? null, pool.token1)} note={tokenSymbol(pool.token1)} />
-                  <PoolMetric label="SPOT PRICE" value={formatPriceX18(pool.spotPriceX18 ?? pool.reservePriceX18, pool.token0, pool.token1)} note="token1 per token0" />
-                  <PoolMetric label="LP FEE" value={formatFeePpm(pool.feePpm)} note="fixed at pool creation" />
-                  <PoolMetric label="TOTAL SHARES" value={pool.totalShares === null ? EMPTY : pool.totalShares.toString()} note="pool LP supply" />
-                  <PoolMetric label="PAIR ID" value={pool.pairId ? `${pool.pairId.slice(0, 10)}...` : EMPTY} note="bytes32" />
-                </div>
-                <div className="dex-pool-reading-note">
-                  <span className={`dex-reading-dot${pool.hasLiquidity ? ' dex-reading-dot--good' : ''}`} />
-                  {pool.hasLiquidity ? 'Reserves are nonzero. Quote reads are enabled.' : 'Pool is deployed but not seeded.'}
-                </div>
-              </section>
-            ) : (
-              <section className="dex-telemetry-panel dex-telemetry-panel--quiet">
-                <span className="panel-kicker">POOL TELEMETRY</span>
-                <h2>No pool readings yet.</h2>
-                <p>Live cards appear only after a real SpotPool, token metadata, pair ID, and reserve tuple are read from Monad.</p>
-              </section>
-            )}
-
-            <section className="dex-orderbook-panel" aria-labelledby="dex-orderbook-title">
-              <div className="dex-panel-heading">
-                <div><span className="panel-kicker">ORDERBOOK / SAME PAIR</span><h2 id="dex-orderbook-title">Best levels</h2></div>
-                <span className="dex-panel-stamp">{dex.orderbook?.bookConfig ? 'READ' : 'WAITING'}</span>
-              </div>
-              {pool?.valid && dex.orderbook ? (
-                <>
-                  <div className="dex-book-levels">
-                    <div><span>BEST BID</span><strong>{formatLevelPrice(dex.orderbook.bestBid?.priceX18 ?? null, pool)}</strong><small>{formatTokenValue(dex.orderbook.bestBid?.totalBase ?? null, pool.token0)} {tokenSymbol(pool.token0)}</small></div>
-                    <div><span>BEST ASK</span><strong>{formatLevelPrice(dex.orderbook.bestAsk?.priceX18 ?? null, pool)}</strong><small>{formatTokenValue(dex.orderbook.bestAsk?.totalBase ?? null, pool.token0)} {tokenSymbol(pool.token0)}</small></div>
-                  </div>
-                  <div className="dex-book-config">
-                    <span>BOOK CONFIG</span>
-                    <strong>{dex.orderbook.bookConfig?.initialized ? 'INITIALIZED' : dex.orderbook.bookConfig ? 'EMPTY' : 'UNAVAILABLE'}</strong>
-                    <small>{dex.orderbook.bookConfig?.tickSize === undefined ? 'Pair config not decoded.' : `Tick ${dex.orderbook.bookConfig.tickSize.toString()}`}</small>
-                  </div>
-                </>
-              ) : (
-                <p className="dex-panel-empty">Orderbook levels wait for a verified pool pair ID.</p>
-              )}
-            </section>
-          </aside>
-        </div>
-
-        <section className="dex-infrastructure" aria-labelledby="dex-infrastructure-title">
-          <div className="dex-section-heading">
-            <div><span className="eyebrow"><span className="eyebrow__line eyebrow__line--ink" />DEPLOYED CONTRACTS</span><h2 id="dex-infrastructure-title">Core contracts<br /><em>on Monad.</em></h2></div>
-            <p>Every address below is the supplied Monad mainnet deployment. Registry reads are compared against these anchors; mismatches stay visible.</p>
+        <section className="dx-contracts" aria-labelledby="dex-contracts-title">
+          <div className="dx-subhead">
+            <h3 id="dex-contracts-title">Core contracts</h3>
+            <span>Monad mainnet deployments</span>
           </div>
-          <div className="dex-infra-grid">
-            <InfrastructureCard label="DexRegistry" address={DEX_CONTRACTS.registry} note="01 / REGISTRY" detail={dex.registryWiring.status === 'healthy' ? 'wiring confirmed' : 'read status visible above'} />
-            <InfrastructureCard label="ProtocolTreasury" address={DEX_CONTRACTS.protocolTreasury} note="02 / TREASURY" detail="protocol fee sink" />
-            <InfrastructureCard label="Orderbook" address={DEX_CONTRACTS.orderbook} note="03 / BOOK" detail={dex.registryWiring.infraRegistry.orderbook ? `registry ${shortenAddress(dex.registryWiring.infraRegistry.orderbook)}` : 'registry read pending'} />
-            <InfrastructureCard label="SpotPoolFactory" address={DEX_CONTRACTS.spotPoolFactory} note="04 / SPOT" detail="pool deployment" />
-            <InfrastructureCard label="PerpPoolFactory" address={DEX_CONTRACTS.perpPoolFactory} note="05 / PERP" detail="perpetual deployment" />
-            <InfrastructureCard
-              label="DexPositionManager"
-              address={DEX_CONTRACTS.positionManager}
-              note="06 / S9-POS"
-              detail={dex.positionManager.symbol ? `${dex.positionManager.symbol} / next #${dex.positionManager.nextTokenId?.toString() ?? EMPTY}` : 'position NFT metadata pending'}
-            />
+          <div className="dx-contracts__grid">
+            <ContractChip name="DexRegistry" address={DEX_CONTRACTS.registry} note={dex.registryWiring.status === 'healthy' ? 'wiring confirmed' : 'wiring check visible above'} />
+            <ContractChip name="ProtocolTreasury" address={DEX_CONTRACTS.protocolTreasury} note="protocol fee sink" />
+            <ContractChip name="Orderbook" address={DEX_CONTRACTS.orderbook} note={dex.registryWiring.infraRegistry.orderbook ? `registry ${shortenAddress(dex.registryWiring.infraRegistry.orderbook)}` : 'registry read pending'} />
+            <ContractChip name="SpotPoolFactory" address={DEX_CONTRACTS.spotPoolFactory} note="pool deployment" />
+            <ContractChip name="PerpPoolFactory" address={DEX_CONTRACTS.perpPoolFactory} note="perpetual deployment" />
+            <ContractChip name="DexPositionManager" address={DEX_CONTRACTS.positionManager} note={dex.positionManager.symbol ? `${dex.positionManager.symbol} / next #${dex.positionManager.nextTokenId?.toString() ?? EMPTY}` : 'position NFT metadata pending'} />
           </div>
-          <div className="dex-s9pos-note">
-            <span>S9-POS</span>
-            <p><strong>DexPositionManager is an ERC-721 position wrapper.</strong> It custodies LP shares and is not the SpotPool swap target. Swaps and deposits approve the selected token to the selected SpotPool only.</p>
-          </div>
+          <p className="dx-s9pos">
+            <strong>S9-POS</strong> DexPositionManager custodies LP shares as an ERC-721 wrapper. It is not the swap target — approvals go to the selected SpotPool only.
+          </p>
         </section>
       </div>
+
+      {tokenSelect !== null && pool?.valid && pool.token0 !== null && pool.token1 !== null && (
+        <TokenSelectDialog
+          side={tokenSelect}
+          tokens={[pool.token0, pool.token1]}
+          balances={[walletToken0?.balance ?? null, walletToken1?.balance ?? null]}
+          selectedIn={tokenIn}
+          selectedOut={tokenOut}
+          onSelect={(selected) => {
+            const lower = selected.address.toLowerCase();
+            if (pool.token0 && lower === pool.token0.address.toLowerCase()) setDirection('token0');
+            else if (pool.token1 && lower === pool.token1.address.toLowerCase()) setDirection('token1');
+            setTokenSelect(null);
+          }}
+          onClose={() => setTokenSelect(null)}
+        />
+      )}
+
+      {finderOpen && (
+        <PoolFinderDialog
+          addressInput={poolAddressInput}
+          onAddressInput={(value) => { setPoolAddressInput(value); setActionError(null); }}
+          onLoadPool={() => {
+            handleLoadPool();
+            if (normalizeDexAddress(poolAddressInput.trim())) setFinderOpen(false);
+          }}
+          finderTokenA={finderTokenA}
+          finderTokenB={finderTokenB}
+          onFinderTokenA={setFinderTokenA}
+          onFinderTokenB={setFinderTokenB}
+          finder={finder}
+          onFindPools={handleFindPools}
+          activePoolAddress={activePoolAddress}
+          onSelectPool={(address) => {
+            selectPool(address);
+            setFinderOpen(false);
+          }}
+          onClose={() => setFinderOpen(false)}
+        />
+      )}
     </section>
   );
 }

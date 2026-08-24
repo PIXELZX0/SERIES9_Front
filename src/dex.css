@@ -401,6 +401,141 @@ summary:focus-visible {
   min-width: 0;
 }
 
+.dx-swap-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.dx-swap-layout > .dx-form {
+  min-width: 0;
+}
+
+.dx-price-chart {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--dx-line);
+  background: var(--dx-fill);
+}
+
+.dx-price-chart__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+
+.dx-price-chart__eyebrow {
+  display: block;
+  color: var(--dx-gold);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .18em;
+}
+
+.dx-price-chart h2 {
+  overflow-wrap: anywhere;
+  margin: 5px 0 0;
+  color: var(--dx-text);
+  font-family: var(--serif);
+  font-size: clamp(21px, 2.4vw, 30px);
+  font-weight: 400;
+  letter-spacing: -.01em;
+}
+
+.dx-price-chart__latest {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: 3px;
+  text-align: right;
+}
+
+.dx-price-chart__latest strong {
+  overflow: hidden;
+  color: var(--dx-gold-bright);
+  font-size: 16px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dx-price-chart__latest span {
+  color: var(--dx-faint);
+  font-size: 10.5px;
+}
+
+.dx-price-chart__plot {
+  margin-top: 18px;
+  border-top: 1px solid rgba(201, 164, 93, .22);
+}
+
+.dx-price-chart__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 640 / 280;
+}
+
+.dx-price-chart__svg line {
+  stroke: rgba(240, 234, 220, .13);
+  stroke-dasharray: 1 8;
+  stroke-linecap: round;
+  stroke-width: 1;
+}
+
+.dx-price-chart__svg polyline {
+  fill: none;
+  stroke: var(--dx-gold-bright);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.dx-price-chart__svg circle {
+  fill: var(--dx-gold-bright);
+  stroke: var(--dx-fill);
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.dx-price-chart__empty {
+  display: grid;
+  place-items: center;
+  min-height: 218px;
+  margin: 0;
+  color: var(--dx-faint);
+  font-size: 12px;
+}
+
+.dx-price-chart__range {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 4px;
+  color: var(--dx-muted);
+  font-size: 11px;
+}
+
+.dx-price-chart__range span {
+  display: grid;
+  gap: 3px;
+}
+
+.dx-price-chart__range span:last-child {
+  text-align: right;
+}
+
+.dx-price-chart__range small {
+  color: var(--dx-faint);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: .14em;
+}
+
 .dx-panel {
   padding: 13px 15px 12px;
   border: 1px solid var(--dx-line);
@@ -1748,6 +1883,18 @@ summary:focus-visible {
   .dx-shell {
     width: 100%;
     max-width: none;
+  }
+
+  .dx-swap-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dx-swap-layout > .dx-price-chart {
+    order: 1;
+  }
+
+  .dx-swap-layout > .dx-form {
+    order: 2;
   }
 
   .dx-stats {

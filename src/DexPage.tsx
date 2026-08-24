@@ -81,6 +81,11 @@ type PoolFinderState = {
   error: string | null;
 };
 
+type PriceHistoryState = {
+  poolKey: string | null;
+  samples: bigint[];
+};
+
 const EMPTY = '--';
 const UINT256_LIMIT = 2n ** 256n;
 const UNRESOLVED_TRANSACTION_STORAGE_KEY = 'series9:unresolved-submitted-transactions';
@@ -128,6 +133,11 @@ const EXPIRY_PRESETS: Array<{ seconds: string; label: string }> = [
 const TOLERANCE_PRESETS = ['0.1', '0.5', '1', '2', '5'] as const;
 
 const PRICE_X18_EXPONENT = 18;
+const MAX_PRICE_SAMPLES = 48;
+const PRICE_CHART_WIDTH = 640;
+const PRICE_CHART_HEIGHT = 280;
+const PRICE_CHART_PADDING = { top: 22, right: 18, bottom: 20, left: 18 } as const;
+const PRICE_CHART_RATIO_SCALE = 1_000_000n;
 
 function walletAddressKey(address: string): string {
   return address.toLowerCase();
@@ -951,6 +961,105 @@ function MetricCard({ label, value, note }: { label: string; value: string; note
   );
 }
 
+function priceChartRatio(value: bigint, min: bigint, max: bigint): number {
+  if (max <= min) return 0.5;
+
+  const range = max - min;
+  const offset = value <= min ? 0n : value >= max ? range : value - min;
+  const scaledOffset = offset * PRICE_CHART_RATIO_SCALE / range;
+  // The ratio is bounded to one million before converting, never the raw price.
+  return Number.parseInt(scaledOffset.toString(), 10) / 1_000_000;
+}
+
+function LivePriceChart({
+  prices,
+  currentPrice,
+  token0,
+  token1,
+}: {
+  prices: bigint[];
+  currentPrice: bigint | null;
+  token0: DexToken | null;
+  token1: DexToken | null;
+}) {
+  const chartPrices = prices.length > 0 ? prices : currentPrice === null ? [] : [currentPrice];
+  const latestPrice = chartPrices[chartPrices.length - 1] ?? null;
+  const token0Name = tokenSymbol(token0);
+  const token1Name = tokenSymbol(token1);
+
+  let minPrice = chartPrices[0] ?? 0n;
+  let maxPrice = minPrice;
+  for (const price of chartPrices) {
+    if (price < minPrice) minPrice = price;
+    if (price > maxPrice) maxPrice = price;
+  }
+
+  const innerWidth = PRICE_CHART_WIDTH - PRICE_CHART_PADDING.left - PRICE_CHART_PADDING.right;
+  const innerHeight = PRICE_CHART_HEIGHT - PRICE_CHART_PADDING.top - PRICE_CHART_PADDING.bottom;
+  const plottedPrices = chartPrices.length === 1 ? [chartPrices[0], chartPrices[0]] : chartPrices;
+  const points = plottedPrices.map((price, index) => {
+    const xRatio = plottedPrices.length <= 1 ? 0.5 : index / (plottedPrices.length - 1);
+    const yRatio = priceChartRatio(price, minPrice, maxPrice);
+    return {
+      x: PRICE_CHART_PADDING.left + xRatio * innerWidth,
+      y: PRICE_CHART_PADDING.top + (1 - yRatio) * innerHeight,
+    };
+  });
+  const pointString = points.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+  const latestPoint = points[points.length - 1] ?? null;
+  const latestLabel = formatPriceX18(latestPrice, token0, token1);
+  const minLabel = formatPriceX18(chartPrices.length > 0 ? minPrice : null, token0, token1);
+  const maxLabel = formatPriceX18(chartPrices.length > 0 ? maxPrice : null, token0, token1);
+  const sampleLabel = chartPrices.length === 1 ? '1 sample' : `${chartPrices.length} samples`;
+
+  return (
+    <section className="dx-price-chart" aria-labelledby="dx-price-chart-heading">
+      <div className="dx-price-chart__head">
+        <div>
+          <span className="dx-price-chart__eyebrow">LIVE PRICE</span>
+          <h2 id="dx-price-chart-heading">{token1Name} per {token0Name}</h2>
+        </div>
+        <div className="dx-price-chart__latest">
+          <strong>{latestLabel}</strong>
+          <span>{chartPrices.length > 0 ? sampleLabel : 'Waiting for sample'}</span>
+        </div>
+      </div>
+
+      <div className="dx-price-chart__plot">
+        {chartPrices.length === 0 ? (
+          <p className="dx-price-chart__empty">Waiting for a live price sample.</p>
+        ) : (
+          <svg
+            className="dx-price-chart__svg"
+            viewBox={`0 0 ${PRICE_CHART_WIDTH} ${PRICE_CHART_HEIGHT}`}
+            role="img"
+            aria-labelledby="dx-price-chart-title"
+            aria-describedby="dx-price-chart-description"
+          >
+            <title id="dx-price-chart-title">Live {token1Name} per {token0Name} price chart</title>
+            <desc id="dx-price-chart-description">
+              {`${chartPrices.length} live samples from ${minLabel} to ${maxLabel}. Latest price is ${latestLabel}.`}
+            </desc>
+            <g aria-hidden="true">
+              {[0, 0.5, 1].map((ratio) => {
+                const y = PRICE_CHART_PADDING.top + ratio * innerHeight;
+                return <line key={ratio} x1={PRICE_CHART_PADDING.left} x2={PRICE_CHART_WIDTH - PRICE_CHART_PADDING.right} y1={y} y2={y} />;
+              })}
+              <polyline points={pointString} />
+              {latestPoint && <circle cx={latestPoint.x} cy={latestPoint.y} r="4" />}
+            </g>
+          </svg>
+        )}
+      </div>
+
+      <div className="dx-price-chart__range" aria-label="Chart price range">
+        <span><small>LOW</small>{minLabel}</span>
+        <span><small>HIGH</small>{maxLabel}</span>
+      </div>
+    </section>
+  );
+}
+
 function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [poolAddressInput, setPoolAddressInput] = useState(DEX_CONFIG.spotPoolAddress ?? '');
   const [activePoolAddress, setActivePoolAddress] = useState<string | null>(DEX_CONFIG.spotPoolAddress);
@@ -983,6 +1092,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [orderAmount, setOrderAmount] = useState('');
   const [orderExpiry, setOrderExpiry] = useState('86400');
   const [nowSeconds, setNowSeconds] = useState(0);
+  const [priceHistory, setPriceHistory] = useState<PriceHistoryState>({ poolKey: null, samples: [] });
 
   const [createTokenA, setCreateTokenA] = useState('');
   const [createTokenB, setCreateTokenB] = useState('');
@@ -1026,6 +1136,12 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     ? applySlippageFloor(currentQuote, slippageBps)
     : null;
   const spotForRate = pool?.spotPriceX18 ?? pool?.reservePriceX18 ?? null;
+  const selectedPoolKey = normalizeDexAddress(activePoolAddress);
+  const loadedPoolKey = normalizeDexAddress(pool?.address);
+  const chartPoolReady = selectedPoolKey !== null && loadedPoolKey === selectedPoolKey;
+  const chartSamples = chartPoolReady && priceHistory.poolKey === selectedPoolKey
+    ? priceHistory.samples
+    : [];
   const priceToken1Per0 = formatPriceX18(spotForRate, pool?.token0 ?? null, pool?.token1 ?? null);
   const priceToken0Per1 = formatPriceX18(
     spotForRate === null ? null : invertPriceX18(spotForRate),
@@ -1180,6 +1296,33 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     const timerId = globalThis.setInterval(tick, 60_000);
     return () => globalThis.clearInterval(timerId);
   }, []);
+
+  useEffect(() => {
+    const selectedPoolKey = normalizeDexAddress(activePoolAddress);
+    const loadedPoolKey = normalizeDexAddress(pool?.address);
+    if (selectedPoolKey === null || loadedPoolKey !== selectedPoolKey || pool?.valid !== true || !pool.hasLiquidity) {
+      const resetTimer = globalThis.setTimeout(() => {
+        setPriceHistory((previous) => {
+          if (previous.poolKey === selectedPoolKey && previous.samples.length === 0) return previous;
+          return { poolKey: selectedPoolKey, samples: [] };
+        });
+      }, 0);
+      return () => globalThis.clearTimeout(resetTimer);
+    }
+
+    const price = pool.spotPriceX18 ?? pool.reservePriceX18;
+    if (price === null) return;
+    const sampleTimer = globalThis.setTimeout(() => {
+      setPriceHistory((previous) => {
+        const previousSamples = previous.poolKey === selectedPoolKey ? previous.samples : [];
+        return {
+          poolKey: selectedPoolKey,
+          samples: [...previousSamples, price].slice(-MAX_PRICE_SAMPLES),
+        };
+      });
+    }, 0);
+    return () => globalThis.clearTimeout(sampleTimer);
+  }, [activePoolAddress, pool]);
 
   useEffect(() => {
     if (!poolReady || tokenIn === null || tokenOut === null || inputAmount === null) {
@@ -2067,76 +2210,84 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             {tab === 'swap' && (
               emptyState || !pool?.valid || !registryReady
                 ? renderGate()
-                : !pool.hasLiquidity
-                  ? noLiquidityGate
-                  : (
-                    <form className="dx-form" onSubmit={handleSwap}>
-                      <TokenPanel
-                        label="You pay"
-                        inputLabel={`Amount of ${tokenSymbol(tokenIn)} to send`}
-                        value={amountIn}
-                        onValueChange={(value) => { setAmountIn(value); setActionError(null); }}
-                        token={tokenIn}
-                        meta={wallet.address ? balanceHint(tokenIn, walletToken?.balance, nativeBalance) : 'Connect for balance'}
-                        metaActionLabel={(spendableBalance(tokenIn, walletToken?.balance, nativeBalance) ?? 0n) > 0n ? 'MAX' : undefined}
-                        onMetaAction={handleMaxAmount}
-                        onTokenClick={() => setTokenSelect('in')}
-                        sub={swapSubIn}
-                        error={insufficientBalance || (amountIn.trim() !== '' && inputAmount === null)}
+                  : !pool.hasLiquidity
+                   ? noLiquidityGate
+                   : (
+                    <div className="dx-swap-layout">
+                      <LivePriceChart
+                        prices={chartSamples}
+                        currentPrice={chartPoolReady ? spotForRate : null}
+                        token0={pool.token0}
+                        token1={pool.token1}
                       />
+                      <form className="dx-form" onSubmit={handleSwap}>
+                        <TokenPanel
+                          label="You pay"
+                          inputLabel={`Amount of ${tokenSymbol(tokenIn)} to send`}
+                          value={amountIn}
+                          onValueChange={(value) => { setAmountIn(value); setActionError(null); }}
+                          token={tokenIn}
+                          meta={wallet.address ? balanceHint(tokenIn, walletToken?.balance, nativeBalance) : 'Connect for balance'}
+                          metaActionLabel={(spendableBalance(tokenIn, walletToken?.balance, nativeBalance) ?? 0n) > 0n ? 'MAX' : undefined}
+                          onMetaAction={handleMaxAmount}
+                          onTokenClick={() => setTokenSelect('in')}
+                          sub={swapSubIn}
+                          error={insufficientBalance || (amountIn.trim() !== '' && inputAmount === null)}
+                        />
 
-                      <div className="dx-flip-row">
-                        <button
-                          type="button"
-                          className="dx-flip"
-                          aria-label="Reverse swap direction"
-                          onClick={() => setDirection((current) => current === 'token0' ? 'token1' : 'token0')}
-                        >
-                          <FlipArrowIcon />
+                        <div className="dx-flip-row">
+                          <button
+                            type="button"
+                            className="dx-flip"
+                            aria-label="Reverse swap direction"
+                            onClick={() => setDirection((current) => current === 'token0' ? 'token1' : 'token0')}
+                          >
+                            <FlipArrowIcon />
+                          </button>
+                        </div>
+
+                        <TokenPanel
+                          label="You receive"
+                          inputLabel={`Estimated ${tokenSymbol(tokenOut)} received`}
+                          value={currentQuote === null ? '' : formatUnits(currentQuote, tokenOut?.decimals ?? 18, 8)}
+                          readOnly
+                          loading={currentQuoteLoading && currentQuote === null}
+                          token={tokenOut}
+                          meta={minimumOut !== null ? `Min ${formatTokenValue(minimumOut, tokenOut, 6)}` : undefined}
+                          onTokenClick={() => setTokenSelect('out')}
+                          sub={swapSubOut}
+                        />
+
+                        {swapRateValue !== EMPTY && (
+                          <button type="button" className="dx-rate" onClick={() => setRateInverted((value) => !value)} aria-label="Toggle rate direction">
+                            <span>1 {tokenSymbol(swapRateBase)} =</span>
+                            <strong>{swapRateValue}</strong>
+                            <RepeatIcon />
+                          </button>
+                        )}
+
+                        <details className="dx-details">
+                          <summary>
+                            Swap details
+                            <span>{slippage}% max slippage</span>
+                          </summary>
+                          <dl>
+                            <div><dt>Minimum received</dt><dd>{formatTokenValue(minimumOut, tokenOut, 6)} {tokenSymbol(tokenOut)}</dd></div>
+                            <div><dt>Liquidity fee</dt><dd>{formatFeePpm(pool?.feePpm ?? null)}</dd></div>
+                            <div><dt>Max slippage</dt><dd>{slippage}%</dd></div>
+                            <div><dt>Route</dt><dd><code>{shortenAddress(pool.address)}</code></dd></div>
+                            <div><dt>Network</dt><dd>Monad chain 143</dd></div>
+                          </dl>
+                        </details>
+
+                        <button className="dx-cta" type="submit" disabled={walletBusy || !swapCtaReady}>
+                          {tradeButtonLabel}
                         </button>
-                      </div>
-
-                      <TokenPanel
-                        label="You receive"
-                        inputLabel={`Estimated ${tokenSymbol(tokenOut)} received`}
-                        value={currentQuote === null ? '' : formatUnits(currentQuote, tokenOut?.decimals ?? 18, 8)}
-                        readOnly
-                        loading={currentQuoteLoading && currentQuote === null}
-                        token={tokenOut}
-                        meta={minimumOut !== null ? `Min ${formatTokenValue(minimumOut, tokenOut, 6)}` : undefined}
-                        onTokenClick={() => setTokenSelect('out')}
-                        sub={swapSubOut}
-                      />
-
-                      {swapRateValue !== EMPTY && (
-                        <button type="button" className="dx-rate" onClick={() => setRateInverted((value) => !value)} aria-label="Toggle rate direction">
-                          <span>1 {tokenSymbol(swapRateBase)} =</span>
-                          <strong>{swapRateValue}</strong>
-                          <RepeatIcon />
-                        </button>
-                      )}
-
-                      <details className="dx-details">
-                        <summary>
-                          Swap details
-                          <span>{slippage}% max slippage</span>
-                        </summary>
-                        <dl>
-                          <div><dt>Minimum received</dt><dd>{formatTokenValue(minimumOut, tokenOut, 6)} {tokenSymbol(tokenOut)}</dd></div>
-                          <div><dt>Liquidity fee</dt><dd>{formatFeePpm(pool?.feePpm ?? null)}</dd></div>
-                          <div><dt>Max slippage</dt><dd>{slippage}%</dd></div>
-                          <div><dt>Route</dt><dd><code>{shortenAddress(pool.address)}</code></dd></div>
-                          <div><dt>Network</dt><dd>Monad chain 143</dd></div>
-                        </dl>
-                      </details>
-
-                      <button className="dx-cta" type="submit" disabled={walletBusy || !swapCtaReady}>
-                        {tradeButtonLabel}
-                      </button>
-                      <p className="dx-note">
-                        Swaps are dry-run against live allowance and balance before signing. Native MON must be wrapped first — this market trades ERC20 pairs only.
-                      </p>
-                    </form>
+                        <p className="dx-note">
+                          Swaps are dry-run against live allowance and balance before signing. Native MON must be wrapped first — this market trades ERC20 pairs only.
+                        </p>
+                      </form>
+                    </div>
                   )
             )}
 

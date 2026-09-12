@@ -871,6 +871,7 @@ function App() {
   const isHomePage = page === 'home';
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [walletModalOpen, setWalletModalOpen] = useState(false);
   const [showAllActivity, setShowAllActivity] = useState(false);
   const [toast, setToast] = useState<{ message: string; kind: ToastKind } | null>(null);
   const [accountRefreshVersion, setAccountRefreshVersion] = useState(0);
@@ -1243,13 +1244,18 @@ function App() {
     }
   }
 
-  async function handleConnectWallet() {
+  function handleConnectWallet() {
     if (connected) {
       wallet.disconnect();
       announce('Wallet disconnected from this site. Revoke access in your wallet to fully remove it.');
       return;
     }
 
+    setWalletModalOpen(true);
+  }
+
+  async function handleConnectWalletInjected() {
+    setWalletModalOpen(false);
     const result = await wallet.connect();
     if (result.error) {
       announceError(result.error);
@@ -1259,6 +1265,7 @@ function App() {
   }
 
   async function handleConnectWalletQr() {
+    setWalletModalOpen(false);
     const result = await wallet.connectQr();
     if (result.error) {
       announceError(result.error);
@@ -1901,18 +1908,6 @@ function App() {
                     : 'Connect wallet'}
               </span>
             </button>
-            {!connected && wallet.qrConnectAvailable && (
-              <button
-                className="wallet-button wallet-button--icon"
-                type="button"
-                aria-label="Connect wallet with QR code"
-                title="Connect with QR code (WalletConnect)"
-                disabled={wallet.connecting || wallet.switching || actionLabel !== null}
-                onClick={() => void handleConnectWalletQr()}
-              >
-                <Icon name="qr" size={16} />
-              </button>
-            )}
             <button
               ref={menuToggleRef}
               className="menu-toggle"
@@ -1927,6 +1922,53 @@ function App() {
           </div>
         </div>
       </header>
+
+      {walletModalOpen && (
+        <div className="wallet-modal-overlay" role="presentation" onClick={() => setWalletModalOpen(false)}>
+          <div
+            className="wallet-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="wallet-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="wallet-modal__header">
+              <h2 id="wallet-modal-title">Connect a wallet</h2>
+              <button
+                className="wallet-modal__close"
+                type="button"
+                aria-label="Close"
+                onClick={() => setWalletModalOpen(false)}
+              >
+                &times;
+              </button>
+            </div>
+            <div className="wallet-modal__options">
+              <button
+                className="wallet-modal__option"
+                type="button"
+                disabled={!wallet.available}
+                onClick={() => void handleConnectWalletInjected()}
+              >
+                <Icon name="wallet" size={20} />
+                <span>
+                  <strong>Browser wallet</strong>
+                  <small>{wallet.available ? 'MetaMask or another injected wallet' : 'No injected wallet detected'}</small>
+                </span>
+              </button>
+              {wallet.qrConnectAvailable && (
+                <button className="wallet-modal__option" type="button" onClick={() => void handleConnectWalletQr()}>
+                  <Icon name="qr" size={20} />
+                  <span>
+                    <strong>WalletConnect</strong>
+                    <small>Scan a QR code with your mobile wallet</small>
+                  </span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <main>
         {isHomePage && (

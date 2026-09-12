@@ -432,6 +432,110 @@ a:focus-visible {
   opacity: .6;
 }
 
+.wallet-modal-overlay {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(10, 10, 9, .72);
+}
+
+.wallet-modal {
+  width: 100%;
+  max-width: 360px;
+  border: 1px solid var(--line-dark);
+  background: var(--ink-soft);
+  color: var(--paper);
+}
+
+.wallet-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line-dark);
+}
+
+.wallet-modal__header h2 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 400;
+}
+
+.wallet-modal__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: rgba(244, 240, 230, .67);
+  font-size: 20px;
+  line-height: 1;
+  transition: color 180ms var(--ease-out);
+}
+
+.wallet-modal__close:hover,
+.wallet-modal__close:focus-visible {
+  color: var(--gold-bright);
+}
+
+.wallet-modal__options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+.wallet-modal__option {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line-dark);
+  background: transparent;
+  color: var(--paper);
+  text-align: left;
+  transition: border-color 180ms var(--ease-out), background-color 180ms var(--ease-out);
+}
+
+.wallet-modal__option svg {
+  flex-shrink: 0;
+  color: var(--gold-bright);
+}
+
+.wallet-modal__option span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.wallet-modal__option strong {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .02em;
+}
+
+.wallet-modal__option small {
+  color: rgba(244, 240, 230, .58);
+  font-size: 11px;
+}
+
+.wallet-modal__option:hover,
+.wallet-modal__option:focus-visible {
+  border-color: var(--gold-bright);
+  background: rgba(232, 196, 106, .08);
+}
+
+.wallet-modal__option:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
 .menu-toggle {
   display: none;
   width: 38px;

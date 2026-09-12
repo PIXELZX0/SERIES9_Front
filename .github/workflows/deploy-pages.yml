@@ -39,6 +39,7 @@ jobs:
         run: npm run build
         env:
           VITE_BASE: ${{ steps.pages.outputs.base_path }}/
+          VITE_WALLETCONNECT_PROJECT_ID: ${{ secrets.VITE_WALLETCONNECT_PROJECT_ID }}
 
       - name: Add SPA fallback
         run: cp dist/index.html dist/404.html

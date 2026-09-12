@@ -594,7 +594,7 @@ export function useDex(poolAddress?: string | null, walletAddress: string | null
 
   useEffect(() => {
     let active = true;
-    let timeoutId: number | undefined;
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
     const controller = new AbortController();
     setState(createEmptyDexState());
 

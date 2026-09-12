@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { MONAD } from './chain.ts';
+import { MONAD, WALLETCONNECT_PROJECT_ID } from './chain.ts';
 
 /** EIP-1193 provider surface, narrowed to what this site calls. */
 type ProviderEventHandler = (...args: unknown[]) => void;
@@ -61,7 +61,9 @@ export type WalletState = {
   connecting: boolean;
   switching: boolean;
   error: string | null;
+  qrConnectAvailable: boolean;
   connect: () => Promise<ConnectResult>;
+  connectQr: () => Promise<ConnectResult>;
   disconnect: () => void;
   switchToMonad: () => Promise<void>;
   estimateTransactionFee: (request: SendTransactionRequest) => Promise<bigint>;
@@ -261,7 +263,7 @@ function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-/** Wallet connection over the single injected EIP-1193 provider. */
+/** Wallet connection over the injected EIP-1193 provider, or WalletConnect (QR) via `connectQr`. */
 export function useWallet(): WalletState {
   const [address, setAddress] = useState<string | null>(null);
   const [chainId, setChainId] = useState<bigint | null>(null);
@@ -274,6 +276,10 @@ export function useWallet(): WalletState {
   const switchInFlightRef = useRef<Promise<void> | null>(null);
   const connectGenerationRef = useRef(0);
   const switchGenerationRef = useRef(0);
+  // Non-null once a WalletConnect (QR) session is the active connection; every read/write
+  // below prefers it over the injected provider so both connection paths share one code path.
+  const activeProviderRef = useRef<Eip1193Provider | null>(null);
+  const wcProviderRef = useRef<(Eip1193Provider & { disconnect?: () => Promise<void> }) | null>(null);
 
   const advanceLifecycle = useCallback((isDisconnect = false): number => {
     lifecycleVersionRef.current += 1;
@@ -298,84 +304,105 @@ export function useWallet(): WalletState {
   );
 
   const available = typeof window !== 'undefined' && Boolean(window.ethereum);
+  const resolveProvider = useCallback((): Eip1193Provider | null => activeProviderRef.current ?? getProvider(), []);
 
-  // Restore an already-authorized session and track wallet-side changes.
+  // Shared between the injected provider (below) and the WalletConnect/QR provider
+  // (created lazily in connectQr) so both connection paths react to wallet-side changes
+  // the same way.
+  const attachProviderListeners = useCallback(
+    (provider: Eip1193Provider): (() => void) => {
+      let active = true;
+
+      const reconcileProviderSession = async (
+        version: number,
+        fallback: string,
+        preservedField: 'accounts' | 'chainId' | null = null,
+      ): Promise<void> => {
+        try {
+          const session = await readProviderSession(provider);
+          if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
+
+          if (preservedField !== 'accounts') setAddress(session.accounts[0] ?? null);
+          if (preservedField !== 'chainId') setChainId(session.chainId);
+          setError(null);
+        } catch (sessionError) {
+          if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
+
+          if (preservedField !== 'accounts') setAddress(null);
+          if (preservedField !== 'chainId') setChainId(null);
+          setError(normalizeProviderError(sessionError, fallback));
+        }
+      };
+
+      const handleAccountsChanged: ProviderEventHandler = (...args) => {
+        if (!active) return;
+        const version = advanceLifecycle();
+        try {
+          const accounts = readAccounts(args[0], 'accountsChanged');
+          if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
+          setAddress(accounts[0] ?? null);
+        } catch (eventError) {
+          if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
+          setAddress(null);
+          setError(normalizeProviderError(eventError, 'Wallet returned an invalid provider session.'));
+          return;
+        }
+        void reconcileProviderSession(version, 'Wallet returned an invalid provider session.', 'accounts');
+      };
+
+      const handleChainChanged: ProviderEventHandler = (...args) => {
+        if (!active) return;
+        const version = advanceLifecycle();
+        try {
+          const nextChainId = readChainId(args[0], 'chainChanged');
+          if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
+          setChainId(nextChainId);
+        } catch (eventError) {
+          if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
+          setChainId(null);
+          setError(normalizeProviderError(eventError, 'Wallet returned an invalid provider session.'));
+          return;
+        }
+        void reconcileProviderSession(version, 'Wallet returned an invalid provider session.', 'chainId');
+      };
+
+      const handleDisconnect: ProviderEventHandler = (...args) => {
+        if (!active) return;
+        const fallback = normalizeProviderError(args[0], DISCONNECTED_MESSAGE);
+        if (activeProviderRef.current === provider) activeProviderRef.current = null;
+        invalidateOperations(fallback);
+      };
+
+      const handleConnect: ProviderEventHandler = () => {
+        if (!active) return;
+        const version = advanceLifecycle();
+        if (disconnectVersionRef.current !== null) return;
+        void reconcileProviderSession(version, 'Wallet returned an invalid provider session.');
+      };
+
+      provider.on?.('accountsChanged', handleAccountsChanged);
+      provider.on?.('chainChanged', handleChainChanged);
+      provider.on?.('disconnect', handleDisconnect);
+      provider.on?.('connect', handleConnect);
+
+      return () => {
+        active = false;
+        provider.removeListener?.('accountsChanged', handleAccountsChanged);
+        provider.removeListener?.('chainChanged', handleChainChanged);
+        provider.removeListener?.('disconnect', handleDisconnect);
+        provider.removeListener?.('connect', handleConnect);
+      };
+    },
+    [advanceLifecycle, invalidateOperations],
+  );
+
+  // Restore an already-authorized injected-wallet session and track wallet-side changes.
   useEffect(() => {
     const provider = getProvider();
     if (!provider) return;
 
     let active = true;
-
-    const reconcileProviderSession = async (
-      version: number,
-      fallback: string,
-      preservedField: 'accounts' | 'chainId' | null = null,
-    ): Promise<void> => {
-      try {
-        const session = await readProviderSession(provider);
-        if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
-
-        if (preservedField !== 'accounts') setAddress(session.accounts[0] ?? null);
-        if (preservedField !== 'chainId') setChainId(session.chainId);
-        setError(null);
-      } catch (sessionError) {
-        if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
-
-        if (preservedField !== 'accounts') setAddress(null);
-        if (preservedField !== 'chainId') setChainId(null);
-        setError(normalizeProviderError(sessionError, fallback));
-      }
-    };
-
-    const handleAccountsChanged: ProviderEventHandler = (...args) => {
-      if (!active) return;
-      const version = advanceLifecycle();
-      try {
-        const accounts = readAccounts(args[0], 'accountsChanged');
-        if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
-        setAddress(accounts[0] ?? null);
-      } catch (eventError) {
-        if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
-        setAddress(null);
-        setError(normalizeProviderError(eventError, 'Wallet returned an invalid provider session.'));
-        return;
-      }
-      void reconcileProviderSession(version, 'Wallet returned an invalid provider session.', 'accounts');
-    };
-
-    const handleChainChanged: ProviderEventHandler = (...args) => {
-      if (!active) return;
-      const version = advanceLifecycle();
-      try {
-        const nextChainId = readChainId(args[0], 'chainChanged');
-        if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
-        setChainId(nextChainId);
-      } catch (eventError) {
-        if (!active || lifecycleVersionRef.current !== version || disconnectVersionRef.current !== null) return;
-        setChainId(null);
-        setError(normalizeProviderError(eventError, 'Wallet returned an invalid provider session.'));
-        return;
-      }
-      void reconcileProviderSession(version, 'Wallet returned an invalid provider session.', 'chainId');
-    };
-
-    const handleDisconnect: ProviderEventHandler = (...args) => {
-      if (!active) return;
-      const fallback = normalizeProviderError(args[0], DISCONNECTED_MESSAGE);
-      invalidateOperations(fallback);
-    };
-
-    const handleConnect: ProviderEventHandler = () => {
-      if (!active) return;
-      const version = advanceLifecycle();
-      if (disconnectVersionRef.current !== null) return;
-      void reconcileProviderSession(version, 'Wallet returned an invalid provider session.');
-    };
-
-    provider.on?.('accountsChanged', handleAccountsChanged);
-    provider.on?.('chainChanged', handleChainChanged);
-    provider.on?.('disconnect', handleDisconnect);
-    provider.on?.('connect', handleConnect);
+    const detach = attachProviderListeners(provider);
 
     void (async () => {
       const readVersion = lifecycleVersionRef.current;
@@ -392,12 +419,35 @@ export function useWallet(): WalletState {
 
     return () => {
       active = false;
-      provider.removeListener?.('accountsChanged', handleAccountsChanged);
-      provider.removeListener?.('chainChanged', handleChainChanged);
-      provider.removeListener?.('disconnect', handleDisconnect);
-      provider.removeListener?.('connect', handleConnect);
+      detach();
     };
-  }, [advanceLifecycle, invalidateOperations]);
+  }, [attachProviderListeners]);
+
+  const getWalletConnectProvider = useCallback(async (): Promise<Eip1193Provider> => {
+    if (wcProviderRef.current) return wcProviderRef.current;
+    if (!WALLETCONNECT_PROJECT_ID) {
+      throw new Error('QR wallet connect is not configured for this site yet.');
+    }
+
+    const { EthereumProvider } = await import('@walletconnect/ethereum-provider');
+    const provider = (await EthereumProvider.init({
+      projectId: WALLETCONNECT_PROJECT_ID,
+      chains: [MONAD.id],
+      optionalChains: [MONAD.id],
+      rpcMap: { [MONAD.id]: MONAD.rpcUrl },
+      showQrModal: true,
+      metadata: {
+        name: 'SERIES9',
+        description: 'SERIES9 identity layer on Monad',
+        url: typeof window !== 'undefined' ? window.location.origin : 'https://series9.xyz',
+        icons: [],
+      },
+    })) as unknown as Eip1193Provider & { disconnect?: () => Promise<void> };
+
+    wcProviderRef.current = provider;
+    attachProviderListeners(provider);
+    return provider;
+  }, [attachProviderListeners]);
 
   const switchToMonad = useCallback((): Promise<void> => {
     const inFlight = switchInFlightRef.current;
@@ -417,7 +467,7 @@ export function useWallet(): WalletState {
       let verifiedChainId: bigint | null = null;
 
       try {
-        const provider = getProvider();
+        const provider = resolveProvider();
         if (!provider) {
           const message = 'No wallet detected. Install a Monad-compatible wallet first.';
           setError(message);
@@ -499,7 +549,7 @@ export function useWallet(): WalletState {
     };
     void promise.then(clearInFlight, clearInFlight);
     return promise;
-  }, []);
+  }, [resolveProvider]);
 
   const connect = useCallback((): Promise<ConnectResult> => {
     const inFlight = connectInFlightRef.current;
@@ -509,7 +559,7 @@ export function useWallet(): WalletState {
     const connectGeneration = connectGenerationRef.current + 1;
     connectGenerationRef.current = connectGeneration;
     const promise = (async (): Promise<ConnectResult> => {
-      const provider = getProvider();
+      const provider = resolveProvider();
       if (!provider) {
         const message = 'No wallet detected. Install MetaMask or another Monad-compatible wallet.';
         setError(message);
@@ -658,7 +708,19 @@ export function useWallet(): WalletState {
     };
     void promise.then(clearInFlight, clearInFlight);
     return promise;
-  }, [advanceLifecycle, switchToMonad]);
+  }, [advanceLifecycle, resolveProvider, switchToMonad]);
+
+  const connectQr = useCallback(async (): Promise<ConnectResult> => {
+    try {
+      const provider = await getWalletConnectProvider();
+      activeProviderRef.current = provider;
+    } catch (setupError) {
+      const message = setupError instanceof Error ? setupError.message : 'Could not start WalletConnect.';
+      setError(message);
+      return { address: null, error: message };
+    }
+    return connect();
+  }, [connect, getWalletConnectProvider]);
 
   const verifyWriteSession = useCallback(
     async (provider: Eip1193Provider, expectedAddress: string, action: string): Promise<string> => {
@@ -728,7 +790,7 @@ export function useWallet(): WalletState {
       setError(DISCONNECTED_MESSAGE);
       throw new Error(DISCONNECTED_MESSAGE);
     }
-    const provider = getProvider();
+    const provider = resolveProvider();
     if (!provider) throw new Error('No wallet detected. Install a Monad-compatible wallet first.');
     if (!address) throw new Error('Connect a wallet before sending a transaction.');
     if (!ADDRESS_PATTERN.test(request.to)) throw new Error('Transaction target is not a valid address.');
@@ -761,14 +823,14 @@ export function useWallet(): WalletState {
       if (disconnectVersionRef.current !== null) throw new Error(DISCONNECTED_MESSAGE);
       throw new Error(normalizeProviderError(sendError, 'Transaction request failed.'));
     }
-  }, [address, verifyWriteSession]);
+  }, [address, resolveProvider, verifyWriteSession]);
 
   const estimateTransactionFee = useCallback(async (request: SendTransactionRequest): Promise<bigint> => {
     if (disconnectVersionRef.current !== null) {
       setError(DISCONNECTED_MESSAGE);
       throw new Error(DISCONNECTED_MESSAGE);
     }
-    const provider = getProvider();
+    const provider = resolveProvider();
     if (!provider) throw new Error('No wallet detected. Install a Monad-compatible wallet first.');
     if (!address) throw new Error('Connect a wallet before estimating transaction fees.');
     if (!ADDRESS_PATTERN.test(request.to)) throw new Error('Transaction target is not a valid address.');
@@ -817,11 +879,11 @@ export function useWallet(): WalletState {
       }
       throw new Error(`Could not estimate transaction fee: ${normalizeProviderError(estimateError, 'Fee estimation failed.')}`);
     }
-  }, [address, verifyWriteSession]);
+  }, [address, resolveProvider, verifyWriteSession]);
 
   const waitForTransaction = useCallback(
     async (hash: string, options: WaitForTransactionOptions = {}): Promise<TransactionReceipt> => {
-      const provider = getProvider();
+      const provider = resolveProvider();
       if (!provider) throw new Error('No wallet detected while waiting for the transaction.');
       if (!isTransactionHash(hash)) throw new Error('Invalid transaction hash.');
 
@@ -856,12 +918,17 @@ export function useWallet(): WalletState {
 
       throw new Error('Timed out waiting for the transaction to be mined.');
     },
-    [],
+    [resolveProvider],
   );
 
-  // Injected wallets have no revoke API, so this clears local session state only.
+  // Injected wallets have no revoke API, so a plain injected disconnect just clears local
+  // state; a WalletConnect session additionally gets torn down so its relay pairing ends.
   const disconnect = useCallback(() => {
+    const wcProvider = wcProviderRef.current;
+    wcProviderRef.current = null;
+    activeProviderRef.current = null;
     invalidateOperations(null);
+    if (wcProvider?.disconnect) void wcProvider.disconnect().catch(() => {});
   }, [invalidateOperations]);
 
   return {
@@ -872,7 +939,9 @@ export function useWallet(): WalletState {
     connecting,
     switching,
     error,
+    qrConnectAvailable: WALLETCONNECT_PROJECT_ID !== '',
     connect,
+    connectQr,
     disconnect,
     switchToMonad,
     estimateTransactionFee,

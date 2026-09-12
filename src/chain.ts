@@ -17,6 +17,9 @@ export const MONAD = {
 // `import.meta.env` is Vite-only; guard it so this module also runs under plain node.
 const env: Record<string, string | undefined> = import.meta.env ?? {};
 
+/** WalletConnect Cloud project id (cloud.reown.com), needed for the QR connect flow. */
+export const WALLETCONNECT_PROJECT_ID = env.VITE_WALLETCONNECT_PROJECT_ID ?? '';
+
 /** Live SERIES9 deployment on Monad mainnet (mirrors series9connect's config). */
 export const CONTRACTS = {
   identity: env.VITE_IDENTITY_ADDRESS ?? '0xEBa0Fd485ADe50AE5182EbB4ff98fCC5613572e9',

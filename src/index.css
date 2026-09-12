@@ -420,6 +420,12 @@ a:focus-visible {
   color: #e29073;
 }
 
+.wallet-button--icon {
+  gap: 0;
+  min-width: 36px;
+  padding: 0;
+}
+
 .wallet-button:disabled,
 .button:disabled {
   cursor: progress;

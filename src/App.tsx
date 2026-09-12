@@ -30,7 +30,7 @@ import { useWallet } from './useWallet.ts';
 import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from './useProtocol.ts';
 import DexPage from './DexPage.tsx';
 
-type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'wallet';
+type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'qr' | 'wallet';
 type SectionId = 'overview' | 'identity' | 'staking' | 'tokenomics' | 'dex' | 'moderator' | 'pulse';
 type SiteRoute = '/' | '/identity' | '/staking' | '/tokenomics' | '/dex' | '/moderator';
 type Page = 'home' | 'identity' | 'staking' | 'tokenomics' | 'dex' | 'moderator';
@@ -664,6 +664,15 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
           <circle cx="19.5" cy="8.1" r="1.1" fill="currentColor" stroke="none" />
         </svg>
       );
+    case 'qr':
+      return (
+        <svg {...commonProps}>
+          <rect x="3" y="3" width="7" height="7" rx="1" />
+          <rect x="14" y="3" width="7" height="7" rx="1" />
+          <rect x="3" y="14" width="7" height="7" rx="1" />
+          <path d="M14 14h3v3h-3zM19 14h2v2h-2zM14 19h2v2h-2zM19 19h2v2h-2z" fill="currentColor" stroke="none" />
+        </svg>
+      );
     case 'wallet':
       return (
         <svg {...commonProps}>
@@ -1242,6 +1251,15 @@ function App() {
     }
 
     const result = await wallet.connect();
+    if (result.error) {
+      announceError(result.error);
+    } else {
+      announce(`Connected ${result.address ? shortenAddress(result.address) : 'wallet'} on ${MONAD.name}.`);
+    }
+  }
+
+  async function handleConnectWalletQr() {
+    const result = await wallet.connectQr();
     if (result.error) {
       announceError(result.error);
     } else {
@@ -1883,6 +1901,18 @@ function App() {
                     : 'Connect wallet'}
               </span>
             </button>
+            {!connected && wallet.qrConnectAvailable && (
+              <button
+                className="wallet-button wallet-button--icon"
+                type="button"
+                aria-label="Connect wallet with QR code"
+                title="Connect with QR code (WalletConnect)"
+                disabled={wallet.connecting || wallet.switching || actionLabel !== null}
+                onClick={() => void handleConnectWalletQr()}
+              >
+                <Icon name="qr" size={16} />
+              </button>
+            )}
             <button
               ref={menuToggleRef}
               className="menu-toggle"

@@ -932,11 +932,13 @@ function CreateAddressField({ value, tokens, balances, excludeAddress, open, onO
   const normalized = value.trim().toLowerCase();
   const excluded = excludeAddress?.toLowerCase() ?? '';
   const catalog = tokens.filter((token) => token.address.toLowerCase() !== excluded);
-  const visible = catalog.filter((token) =>
-    !normalized ||
-    token.symbol?.toLowerCase().includes(normalized) ||
-    token.address.toLowerCase().includes(normalized));
   const owned = catalog.filter((token) => (balances.get(token.address.toLowerCase()) ?? 0n) > 0n);
+  const ownedAddresses = new Set(owned.map((token) => token.address.toLowerCase()));
+  const visible = catalog.filter((token) =>
+    (normalized || !ownedAddresses.has(token.address.toLowerCase())) &&
+    (!normalized ||
+      token.symbol?.toLowerCase().includes(normalized) ||
+      token.address.toLowerCase().includes(normalized)));
   const recentAddresses = recents.filter((address) =>
     address.toLowerCase() !== excluded && !catalog.some((token) => token.address.toLowerCase() === address.toLowerCase()));
 

@@ -29,8 +29,9 @@
   justify-items: stretch;
   gap: 22px;
   width: 100%;
-  max-width: none;
-  margin: 0;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 32px;
 }
 
 /* ── buttons ──────────────────────────────────────────────────────────────── */
@@ -2396,6 +2397,7 @@ button.dx-pool-row:hover {
   .dx-shell {
     width: 100%;
     max-width: none;
+    padding: 0 20px;
   }
 
   .dx-swap-layout {
@@ -2425,6 +2427,7 @@ button.dx-pool-row:hover {
     width: 100%;
     max-width: none;
     gap: 16px;
+    padding: 0 14px;
   }
 
   .dx-card__head {

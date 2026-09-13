@@ -42,6 +42,16 @@ type ProviderSession = {
   chainId: bigint;
 };
 
+// WalletConnect's EthereumProvider forwards `request()` straight to its signer, which throws
+// "Please call connect() before request()" until a session exists — unlike an injected provider,
+// which treats `eth_requestAccounts` as the connect step. `connect()` here opens the QR modal
+// and must resolve before the shared `connect` flow below issues its first request.
+type WalletConnectProvider = Eip1193Provider & {
+  readonly session?: unknown;
+  connect: () => Promise<unknown>;
+  disconnect?: () => Promise<void>;
+};
+
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const QUANTITY_PATTERN = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
@@ -279,7 +289,7 @@ export function useWallet(): WalletState {
   // Non-null once a WalletConnect (QR) session is the active connection; every read/write
   // below prefers it over the injected provider so both connection paths share one code path.
   const activeProviderRef = useRef<Eip1193Provider | null>(null);
-  const wcProviderRef = useRef<(Eip1193Provider & { disconnect?: () => Promise<void> }) | null>(null);
+  const wcProviderRef = useRef<WalletConnectProvider | null>(null);
 
   const advanceLifecycle = useCallback((isDisconnect = false): number => {
     lifecycleVersionRef.current += 1;
@@ -423,7 +433,7 @@ export function useWallet(): WalletState {
     };
   }, [attachProviderListeners]);
 
-  const getWalletConnectProvider = useCallback(async (): Promise<Eip1193Provider> => {
+  const getWalletConnectProvider = useCallback(async (): Promise<WalletConnectProvider> => {
     if (wcProviderRef.current) return wcProviderRef.current;
     if (!WALLETCONNECT_PROJECT_ID) {
       throw new Error('QR wallet connect is not configured for this site yet.');
@@ -442,7 +452,7 @@ export function useWallet(): WalletState {
         url: typeof window !== 'undefined' ? window.location.origin : 'https://series9.xyz',
         icons: [],
       },
-    })) as unknown as Eip1193Provider & { disconnect?: () => Promise<void> };
+    })) as unknown as WalletConnectProvider;
 
     wcProviderRef.current = provider;
     attachProviderListeners(provider);
@@ -714,6 +724,7 @@ export function useWallet(): WalletState {
     try {
       const provider = await getWalletConnectProvider();
       activeProviderRef.current = provider;
+      if (!provider.session) await provider.connect();
     } catch (setupError) {
       const message = setupError instanceof Error ? setupError.message : 'Could not start WalletConnect.';
       setError(message);

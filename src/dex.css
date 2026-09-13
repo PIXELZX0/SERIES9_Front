@@ -31,7 +31,7 @@
   width: 100%;
   max-width: 1200px;
   margin: 0 auto;
-  padding: 0 32px;
+  padding: 0 20px;
 }
 
 /* ── buttons ──────────────────────────────────────────────────────────────── */
@@ -402,7 +402,7 @@ summary:focus-visible {
 
 .dx-swap-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr);
+  grid-template-columns: minmax(0, 1.3fr) minmax(280px, .68fr);
   gap: 18px;
   align-items: start;
 }

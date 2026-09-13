@@ -405,6 +405,26 @@ function parsePriceToX18(value: string, baseDecimals: number | null, quoteDecima
   return parseTokenAmount(value, scale);
 }
 
+/**
+ * Uniswap has no unauthenticated price endpoint (the official Trading API
+ * needs a server-side x-api-key). CoinGecko's contract-price lookup is the
+ * closest no-key equivalent for a reference market price.
+ */
+async function fetchExternalTokenPricesUsd(addresses: string[], signal?: AbortSignal): Promise<Record<string, number>> {
+  const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase())));
+  if (unique.length === 0) return {};
+  const url = `https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses=${unique.join(',')}&vs_currencies=usd`;
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(`Reference price lookup failed (HTTP ${response.status}).`);
+  const payload = (await response.json()) as Record<string, { usd?: number } | undefined>;
+  const prices: Record<string, number> = {};
+  for (const address of unique) {
+    const usd = payload[address]?.usd;
+    if (typeof usd === 'number') prices[address] = usd;
+  }
+  return prices;
+}
+
 function orderEscrow(side: OrderSide, priceX18: bigint, amount: bigint): bigint {
   return side === 'buy' ? priceX18 * amount / 10n ** 18n : amount;
 }
@@ -1477,6 +1497,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
   const [addAmount0, setAddAmount0] = useState('');
   const [addAmount1, setAddAmount1] = useState('');
+  const [referenceAddress0, setReferenceAddress0] = useState('');
+  const [referenceAddress1, setReferenceAddress1] = useState('');
+  const [referencePrices, setReferencePrices] = useState<Record<string, number>>({});
+  const [referencePriceLoading, setReferencePriceLoading] = useState(false);
+  const [referencePriceError, setReferencePriceError] = useState<string | null>(null);
   const [liquidityTolerance, setLiquidityTolerance] = useState('1');
   const [removePercent, setRemovePercent] = useState<number>(50);
 
@@ -1587,6 +1612,13 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const amount0In = parseTokenAmount(addAmount0, pool?.token0?.decimals ?? null);
   const amount1In = parseTokenAmount(addAmount1, pool?.token1?.decimals ?? null);
   const poolRatioReady = pool?.reserves != null && pool.reserves.reserve0 > 0n && pool.reserves.reserve1 > 0n;
+  const referenceAddress0Normalized = normalizeDexAddress(referenceAddress0);
+  const referenceAddress1Normalized = normalizeDexAddress(referenceAddress1);
+  const referencePrice0 = referenceAddress0Normalized ? referencePrices[referenceAddress0Normalized.toLowerCase()] ?? null : null;
+  const referencePrice1 = referenceAddress1Normalized ? referencePrices[referenceAddress1Normalized.toLowerCase()] ?? null : null;
+  const referenceRatio = referencePrice0 !== null && referencePrice1 !== null && referencePrice1 !== 0
+    ? referencePrice0 / referencePrice1
+    : null;
   const approvalRequired0 = amount0In !== null && (walletToken0?.allowance == null || amount0In > walletToken0.allowance);
   const approvalRequired1 = amount1In !== null && (walletToken1?.allowance == null || amount1In > walletToken1.allowance);
   const wrap0 = monWrapShortfall(pool?.token0 ?? null, walletToken0?.balance, amount0In, nativeBalance);
@@ -1748,6 +1780,44 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
     return () => controller.abort();
   }, [inputAmount, poolReady, quoteRequestKey, readSpotQuote, tokenIn, tokenOut]);
+
+  useEffect(() => {
+    const addresses = [referenceAddress0Normalized, referenceAddress1Normalized].filter(
+      (address): address is string => address !== null,
+    );
+    if (addresses.length === 0) {
+      const timer = setTimeout(() => {
+        setReferencePrices({});
+        setReferencePriceError(null);
+        setReferencePriceLoading(false);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+
+    const controller = new AbortController();
+    const loadingTimer = setTimeout(() => setReferencePriceLoading(true), 0);
+    const timer = setTimeout(() => {
+      void fetchExternalTokenPricesUsd(addresses, controller.signal)
+        .then((prices) => {
+          if (controller.signal.aborted) return;
+          setReferencePrices(prices);
+          setReferencePriceError(Object.keys(prices).length === 0 ? 'No reference price found for that address.' : null);
+          setReferencePriceLoading(false);
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) return;
+          setReferencePrices({});
+          setReferencePriceError(error instanceof Error ? error.message : 'Reference price lookup failed.');
+          setReferencePriceLoading(false);
+        });
+    }, 400);
+
+    return () => {
+      clearTimeout(loadingTimer);
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [referenceAddress0Normalized, referenceAddress1Normalized]);
 
   function notifyError(message: string) {
     setActionError(message);
@@ -2441,6 +2511,21 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     setAddAmount0(formatUnits(amount1In * reserve0 / reserve1, pool.token0.decimals, pool.token0.decimals));
   }
 
+  function handleUseReferenceRatio() {
+    if (referenceRatio === null || pool?.token0 == null || pool.token1 == null) return;
+    if (pool.token0.decimals === null || pool.token1.decimals === null) return;
+
+    if (amount0In !== null) {
+      const amount0Float = Number(formatUnits(amount0In, pool.token0.decimals, pool.token0.decimals).replace(/,/g, ''));
+      setAddAmount1((amount0Float * referenceRatio).toString());
+      return;
+    }
+    if (amount1In !== null) {
+      const amount1Float = Number(formatUnits(amount1In, pool.token1.decimals, pool.token1.decimals).replace(/,/g, ''));
+      setAddAmount0((amount1Float / referenceRatio).toString());
+    }
+  }
+
   function handleMaxDeposit(side: 'token0' | 'token1') {
     const target = side === 'token0' ? walletToken0 : walletToken1;
     const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
@@ -2806,6 +2891,42 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                         </strong>
                         <small>{tokenSymbol(pool?.token0 ?? null)} / {tokenSymbol(pool?.token1 ?? null)}</small>
                       </div>
+                    </div>
+
+                    <div className="dx-setting-row dx-reference-price">
+                      <span>참고 시세 (CoinGecko · Uniswap 풀 공식 API는 서버용 키가 필요해 대체)</span>
+                      <div className="dx-reference-price__inputs">
+                        <input
+                          value={referenceAddress0}
+                          onChange={(event) => setReferenceAddress0(event.target.value)}
+                          placeholder={`${tokenSymbol(pool?.token0 ?? null)} 이더리움 mainnet 주소 (0x…)`}
+                          spellCheck="false"
+                          autoComplete="off"
+                          aria-label={`${tokenSymbol(pool?.token0 ?? null)} reference address`}
+                        />
+                        <input
+                          value={referenceAddress1}
+                          onChange={(event) => setReferenceAddress1(event.target.value)}
+                          placeholder={`${tokenSymbol(pool?.token1 ?? null)} 이더리움 mainnet 주소 (0x…)`}
+                          spellCheck="false"
+                          autoComplete="off"
+                          aria-label={`${tokenSymbol(pool?.token1 ?? null)} reference address`}
+                        />
+                      </div>
+                      <small>
+                        {referencePriceLoading
+                          ? '시세 조회 중…'
+                          : referencePriceError
+                            ? referencePriceError
+                            : referenceRatio !== null
+                              ? `1 ${tokenSymbol(pool?.token0 ?? null)} ≈ ${referenceRatio.toFixed(6)} ${tokenSymbol(pool?.token1 ?? null)} (CoinGecko 기준, 참고용)`
+                              : '두 토큰의 이더리움 주소를 입력하면 CoinGecko 기준 참고 시세를 보여줍니다.'}
+                        {referenceRatio !== null && (
+                          <button type="button" onClick={handleUseReferenceRatio} disabled={amount0In === null && amount1In === null}>
+                            비율 적용
+                          </button>
+                        )}
+                      </small>
                     </div>
 
                     <form className="dx-form" onSubmit={handleAddLiquidity}>

@@ -1579,6 +1579,52 @@ button.dx-pool-row:hover {
   font-size: 11px;
 }
 
+.dx-reference-price__inputs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dx-reference-price__inputs input {
+  flex: 1;
+  min-width: 200px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  outline: 0;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  transition: border-color 150ms var(--ease-out);
+}
+
+.dx-reference-price__inputs input:focus {
+  border-color: color-mix(in srgb, var(--gold) 55%, transparent);
+}
+
+.dx-reference-price > small {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dx-reference-price > small button {
+  color: var(--gold);
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dx-reference-price > small button:hover:not(:disabled) {
+  color: var(--gold-bright);
+}
+
+.dx-reference-price > small button:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
 .dx-subhead {
   display: flex;
   align-items: baseline;

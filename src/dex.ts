@@ -67,6 +67,8 @@ export const DEX_SELECTOR = {
   swapExactIn: '0xa6220b66',
   /** WMON is a WETH9 clone: `deposit()` is payable and mints 1:1. */
   deposit: '0xd0e30db0',
+  /** WMON `withdraw(uint256)` burns 1:1 and returns native MON. */
+  withdraw: '0x2e1a7d4d',
   positionManagerName: '0x06fdde03',
   positionManagerSymbol: '0x95d89b41',
   nextTokenId: '0x75794a3c',
@@ -285,6 +287,11 @@ export function encodeLevelOf(pairId: string, side: bigint, priceX18: bigint): s
 
 export function encodeSharesOf(owner: string): string {
   return encodeCall(DEX_SELECTOR.sharesOf, [encodeAddress(owner)]);
+}
+
+/** Unwrap WMON back into native MON, the mirror of the `deposit()` wrap. */
+export function encodeWithdraw(amount: bigint): string {
+  return encodeCall(DEX_SELECTOR.withdraw, [encodeUint(amount)]);
 }
 
 export function encodeSwapExactIn(

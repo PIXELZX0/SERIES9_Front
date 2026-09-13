@@ -18,9 +18,13 @@ import {
   encodeCreateSpotPool,
   encodeDexNoArgs,
   encodeErc20Approve,
+  encodeErc20BalanceOf,
   encodePlaceOrder,
   encodeRemoveLiquidity,
   encodeSwapExactIn,
+  encodeWithdraw,
+  dexCall,
+  decodeDexUint,
   monWrapShortfall,
   normalizeDexAddress,
   readSpotPoolsForPair,
@@ -1662,6 +1666,31 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     }
   }
 
+  function isWmonToken(token: DexToken | null): token is DexToken {
+    return token !== null && token.address.toLowerCase() === TOKENS.wmon.toLowerCase();
+  }
+
+  async function readTokenBalance(tokenAddress: string, owner: string): Promise<bigint | null> {
+    const [result] = await rpcBatch([dexCall(tokenAddress, encodeErc20BalanceOf(owner))]);
+    return decodeDexUint(result);
+  }
+
+  /**
+   * Mirror of `wrapMon`: unwrap WMON back to native MON so a swap or a
+   * liquidity withdrawal that lands in WMON is felt by the trader as MON,
+   * same as the wrap step makes native MON spendable on the way in.
+   */
+  async function unwrapMon(token: DexToken, amount: bigint): Promise<void> {
+    if (amount <= 0n) return;
+    const unwrapped = await sendDexTransaction('Unwrap MON', {
+      to: token.address,
+      data: encodeWithdraw(amount),
+    });
+    if (unwrapped) {
+      onNotify(`Unwrapped ${formatUnits(amount, 18, 4)} MON back to native MON.`);
+    }
+  }
+
   async function handleSwap(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canStartWrite()) return;
@@ -1721,6 +1750,9 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
         throw new Error('Final swap output is too small for the selected slippage. No zero-minimum swap will be signed.');
       }
 
+      const outputIsWmon = isWmonToken(tokenOut);
+      const wmonBalanceBefore = outputIsWmon ? await readTokenBalance(tokenOut.address, recipient) : null;
+
       const swapped = await sendDexTransaction(swapLabel, {
         to: pool.address,
         data: encodeSwapExactIn(tokenIn.address, inputAmount, simulatedMinimumOut, recipient),
@@ -1728,6 +1760,13 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       if (swapped) {
         setAmountIn('');
         setQuote(null);
+        if (outputIsWmon && wmonBalanceBefore !== null) {
+          const wmonBalanceAfter = await readTokenBalance(tokenOut.address, recipient);
+          const received = wmonBalanceAfter !== null && wmonBalanceAfter > wmonBalanceBefore
+            ? wmonBalanceAfter - wmonBalanceBefore
+            : null;
+          if (received !== null) await unwrapMon(tokenOut, received);
+        }
       }
     } catch (swapError: unknown) {
       if (!isCurrentOperation(swapOperation)) return;
@@ -1817,13 +1856,23 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     const amount0Min = redeemable ? applySlippageFloor(redeemable.amount0, bps) : 1n;
     const amount1Min = redeemable ? applySlippageFloor(redeemable.amount1, bps) : 1n;
 
-    await simulateThenSend(
+    const wmonSide = isWmonToken(pool.token0) ? pool.token0 : isWmonToken(pool.token1) ? pool.token1 : null;
+    const wmonBalanceBefore = wmonSide ? await readTokenBalance(wmonSide.address, recipient) : null;
+
+    const removed = await simulateThenSend(
       `Remove ${removePercent}% of liquidity`,
       {
         to: pool.address,
         data: encodeRemoveLiquidity(removeShares, amount0Min > 0n ? amount0Min : 1n, amount1Min > 0n ? amount1Min : 1n, recipient),
       },
     );
+    if (removed && wmonSide && wmonBalanceBefore !== null) {
+      const wmonBalanceAfter = await readTokenBalance(wmonSide.address, recipient);
+      const received = wmonBalanceAfter !== null && wmonBalanceAfter > wmonBalanceBefore
+        ? wmonBalanceAfter - wmonBalanceBefore
+        : null;
+      if (received !== null) await unwrapMon(wmonSide, received);
+    }
   }
 
   async function handlePlaceOrder(event: FormEvent<HTMLFormElement>) {

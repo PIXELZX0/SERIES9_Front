@@ -368,6 +368,16 @@ summary:focus-visible {
   color: var(--dx-text);
 }
 
+.dx-chip:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.dx-chip:disabled:hover {
+  border-color: var(--dx-line);
+  color: var(--dx-muted);
+}
+
 .dx-chip--active {
   border-color: var(--dx-gold);
   background: rgba(201, 164, 93, .13);
@@ -1216,6 +1226,178 @@ button.dx-pool-row:hover {
   }
 }
 
+/* ── pool wizard (breadcrumb, steps, manage sidebar) ─────────────────────── */
+
+.dx-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--dx-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.dx-breadcrumb button {
+  background: transparent;
+  color: var(--dx-faint);
+}
+
+.dx-breadcrumb button:hover {
+  color: var(--dx-gold-bright);
+}
+
+.dx-breadcrumb span[aria-current] {
+  color: var(--dx-text);
+}
+
+.dx-wizard-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+}
+
+.dx-wizard-steps__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  color: var(--dx-faint);
+}
+
+.dx-wizard-steps__item > span {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--dx-line);
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.dx-wizard-steps__item div {
+  display: grid;
+  gap: 1px;
+}
+
+.dx-wizard-steps__item b {
+  color: var(--dx-faint);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.dx-wizard-steps__item strong {
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.dx-wizard-steps__item--active {
+  color: var(--dx-text);
+}
+
+.dx-wizard-steps__item--active > span {
+  border-color: var(--dx-gold-bright);
+  background: var(--dx-gold-bright);
+  color: var(--ink);
+}
+
+.dx-wizard-steps__item--active b {
+  color: var(--dx-gold-bright);
+}
+
+.dx-wizard-steps__item--done > span {
+  border-color: var(--dx-gold);
+  color: var(--dx-gold-bright);
+}
+
+.dx-manage__sidebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--dx-line);
+  background: rgba(240, 234, 220, .025);
+}
+
+.dx-manage__pair {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dx-manage__pair strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.dx-manage__pair small {
+  color: var(--dx-faint);
+  font-size: 10.5px;
+}
+
+.dx-manage__badges {
+  display: flex;
+}
+
+.dx-manage__badges > span:last-child {
+  margin-left: -8px;
+  outline: 2px solid var(--dx-card);
+}
+
+.dx-manage__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 0;
+}
+
+.dx-manage__stats > div {
+  display: grid;
+  gap: 2px;
+}
+
+.dx-manage__stats dt {
+  color: var(--dx-faint);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.dx-manage__stats dd {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.dx-range-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.dx-range-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 750;
+}
+
 /* ── liquidity ────────────────────────────────────────────────────────────── */
 
 .dx-position {
@@ -1792,6 +1974,43 @@ button.dx-pool-row:hover {
   padding: 4px 11px 3px;
   color: var(--dx-faint);
   font-size: 10.5px;
+}
+
+.dx-pickmenu__quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 6px 8px;
+}
+
+.dx-pickmenu__quick button {
+  padding: 0;
+  background: transparent;
+  border-radius: 50%;
+  transition: outline-color 140ms var(--ease-out);
+  outline: 2px solid transparent;
+  outline-offset: 1px;
+}
+
+.dx-pickmenu__quick button:hover {
+  outline-color: var(--dx-gold);
+}
+
+.dx-pickmenu__section {
+  margin: 6px 6px 0;
+  padding: 0;
+  color: var(--dx-faint);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.dx-pickmenu__balance {
+  flex-shrink: 0;
+  color: var(--dx-faint);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 /* ── stats grid ───────────────────────────────────────────────────────────── */

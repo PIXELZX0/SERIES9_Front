@@ -120,6 +120,30 @@ const CREATE_TOKEN_CATALOG: CatalogToken[] = [
   { address: TOKENS.usdc, symbol: 'USDC', decimals: 6 },
 ];
 
+const RECENT_CUSTOM_TOKENS_KEY = 'series9:dex-recent-create-tokens';
+const RECENT_CUSTOM_TOKENS_LIMIT = 5;
+
+function readRecentCustomTokens(): string[] {
+  try {
+    const raw = window.localStorage.getItem(RECENT_CUSTOM_TOKENS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberCustomToken(address: string): void {
+  try {
+    const next = [address, ...readRecentCustomTokens().filter((item) => item.toLowerCase() !== address.toLowerCase())]
+      .slice(0, RECENT_CUSTOM_TOKENS_LIMIT);
+    window.localStorage.setItem(RECENT_CUSTOM_TOKENS_KEY, JSON.stringify(next));
+  } catch {
+    // Private mode / full quota: recents just don't persist next visit.
+  }
+}
+
 /** Locally hosted logos used when a token's on-chain `image()` metadata is missing. */
 const KNOWN_TOKEN_IMAGES: Record<string, string> = {
   [CONTRACTS.ser9.toLowerCase()]: `${import.meta.env.BASE_URL}token-logos/ser9.svg`,
@@ -303,6 +327,18 @@ function formatUsd(value: number | null): string {
   if (value === null) return EMPTY;
   if (value > 0 && value < 0.01) return '<US$0.01';
   return `US$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** TVL in USD when one side of the pool is USDC — a constant-product pool always splits value 50/50, so double the USDC side. Null when neither token is USDC. */
+function poolTvlUsd(pool: DexPoolSnapshot | null): number | null {
+  if (!pool?.reserves || !pool.token0 || !pool.token1) return null;
+  const usdcSide = pool.token0.symbol === 'USDC'
+    ? { token: pool.token0, reserve: pool.reserves.reserve0 }
+    : pool.token1.symbol === 'USDC'
+      ? { token: pool.token1, reserve: pool.reserves.reserve1 }
+      : null;
+  if (!usdcSide || usdcSide.token.decimals === null) return null;
+  return (Number(usdcSide.reserve) / 10 ** usdcSide.token.decimals) * 2;
 }
 
 function formatAgo(timestamp: number | null): string {
@@ -832,30 +868,74 @@ function TokenSelectDialog({ side, tokens, balances, selectedIn, selectedOut, on
   );
 }
 
+/** Balances for the small fixed create-tab token catalog, one batched read at a time. */
+function useCreateTokenBalances(wallet: string | null, tokens: CatalogToken[]): Map<string, bigint | null> {
+  const [balances, setBalances] = useState<Map<string, bigint | null>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    const walletAddress = normalizeDexAddress(wallet);
+
+    (walletAddress
+      ? rpcBatch(tokens.map((token) => dexCall(token.address, encodeErc20BalanceOf(walletAddress))), controller.signal)
+        .then((results) => {
+          const next = new Map<string, bigint | null>();
+          tokens.forEach((token, index) => next.set(token.address.toLowerCase(), decodeDexUint(results[index])));
+          return next;
+        })
+        .catch(() => new Map<string, bigint | null>())
+      : Promise.resolve(new Map<string, bigint | null>())
+    ).then((next) => { if (!cancelled) setBalances(next); });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [wallet, tokens]);
+
+  return balances;
+}
+
 type CreateAddressFieldProps = {
   value: string;
   tokens: CatalogToken[];
+  balances: Map<string, bigint | null>;
   excludeAddress: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onChange: (value: string) => void;
 };
 
-function CreateAddressField({ value, tokens, excludeAddress, open, onOpenChange, onChange }: CreateAddressFieldProps) {
+function CreateAddressField({ value, tokens, balances, excludeAddress, open, onOpenChange, onChange }: CreateAddressFieldProps) {
+  const [recents, setRecents] = useState<string[]>(() => readRecentCustomTokens());
   const normalized = value.trim().toLowerCase();
   const excluded = excludeAddress?.toLowerCase() ?? '';
-  const visible = tokens.filter((token) =>
-    token.address.toLowerCase() !== excluded &&
-    (!normalized ||
-      token.symbol?.toLowerCase().includes(normalized) ||
-      token.address.toLowerCase().includes(normalized)));
+  const catalog = tokens.filter((token) => token.address.toLowerCase() !== excluded);
+  const visible = catalog.filter((token) =>
+    !normalized ||
+    token.symbol?.toLowerCase().includes(normalized) ||
+    token.address.toLowerCase().includes(normalized));
+  const owned = catalog.filter((token) => (balances.get(token.address.toLowerCase()) ?? 0n) > 0n);
+  const recentAddresses = recents.filter((address) =>
+    address.toLowerCase() !== excluded && !catalog.some((token) => token.address.toLowerCase() === address.toLowerCase()));
+
+  function close(nextValue?: string) {
+    const candidate = (nextValue ?? value).trim();
+    const isCustom = normalizeDexAddress(candidate) !== null && !catalog.some((token) => token.address.toLowerCase() === candidate.toLowerCase());
+    if (isCustom) {
+      rememberCustomToken(candidate);
+      setRecents(readRecentCustomTokens());
+    }
+    onOpenChange(false);
+  }
 
   return (
     <div
       className="dx-pickfield"
       onBlur={(event) => {
         if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
-          onOpenChange(false);
+          close();
         }
       }}
       onKeyDown={(event) => {
@@ -877,6 +957,64 @@ function CreateAddressField({ value, tokens, excludeAddress, open, onOpenChange,
       </div>
       {open && (
         <div className="dx-pickmenu" role="listbox" aria-label="Token list">
+          {!normalized && catalog.length > 0 && (
+            <div className="dx-pickmenu__quick">
+              {catalog.map((token) => (
+                <button
+                  key={token.address}
+                  type="button"
+                  title={tokenSymbol(token)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => { onChange(token.address); close(token.address); }}
+                >
+                  <TokenBadge token={token} />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {!normalized && owned.length > 0 && (
+            <>
+              <p className="dx-pickmenu__section">내 토큰</p>
+              {owned.map((token) => (
+                <button
+                  key={`owned-${token.address}`}
+                  type="button"
+                  role="option"
+                  aria-selected={value.toLowerCase() === token.address.toLowerCase()}
+                  className="dx-pickmenu__option"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => { onChange(token.address); close(token.address); }}
+                >
+                  <TokenBadge token={token} />
+                  <strong>{tokenSymbol(token)}</strong>
+                  <code>{shortenAddress(token.address)}</code>
+                  <span className="dx-pickmenu__balance">{formatTokenValue(balances.get(token.address.toLowerCase()) ?? null, token, 4)}</span>
+                </button>
+              ))}
+            </>
+          )}
+
+          {!normalized && recentAddresses.length > 0 && (
+            <>
+              <p className="dx-pickmenu__section">최근 검색</p>
+              {recentAddresses.map((address) => (
+                <button
+                  key={`recent-${address}`}
+                  type="button"
+                  role="option"
+                  aria-selected={value.toLowerCase() === address.toLowerCase()}
+                  className="dx-pickmenu__option"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => { onChange(address); close(address); }}
+                >
+                  <TokenBadge token={null} />
+                  <code>{shortenAddress(address)}</code>
+                </button>
+              ))}
+            </>
+          )}
+
           {visible.map((token) => (
             <button
               key={token.address}
@@ -885,7 +1023,7 @@ function CreateAddressField({ value, tokens, excludeAddress, open, onOpenChange,
               aria-selected={value.toLowerCase() === token.address.toLowerCase()}
               className="dx-pickmenu__option"
               onMouseDown={(event) => event.preventDefault()}
-              onClick={() => { onChange(token.address); onOpenChange(false); }}
+              onClick={() => { onChange(token.address); close(token.address); }}
             >
               <TokenBadge token={token} />
               <strong>{tokenSymbol(token)}</strong>
@@ -1004,6 +1142,37 @@ function MetricCard({ label, value, note }: { label: string; value: string; note
       <strong>{value}</strong>
       {note && <small>{note}</small>}
     </div>
+  );
+}
+
+function PoolWizardBreadcrumb({ onBack }: { onBack: () => void }) {
+  return (
+    <nav className="dx-breadcrumb" aria-label="Breadcrumb">
+      <button type="button" onClick={onBack}>내 포지션</button>
+      <span aria-hidden="true">›</span>
+      <span aria-current="page">풀 생성</span>
+    </nav>
+  );
+}
+
+function PoolWizardSteps({ step }: { step: 1 | 2 }) {
+  return (
+    <ol className="dx-wizard-steps">
+      <li className={`dx-wizard-steps__item${step === 1 ? ' dx-wizard-steps__item--active' : ' dx-wizard-steps__item--done'}`}>
+        <span>1</span>
+        <div>
+          <b>1단계</b>
+          <strong>토큰 페어 및 수수료 선택</strong>
+        </div>
+      </li>
+      <li className={`dx-wizard-steps__item${step === 2 ? ' dx-wizard-steps__item--active' : ''}`}>
+        <span>2</span>
+        <div>
+          <b>2단계</b>
+          <strong>초기 유동성 예치</strong>
+        </div>
+      </li>
+    </ol>
   );
 }
 
@@ -1304,6 +1473,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [positionFilter, setPositionFilter] = useState<'all' | 'in-range' | 'out-of-range'>('all');
   const [positionSearch, setPositionSearch] = useState('');
   const poolOverview = usePoolPositions(wallet.address, CREATE_TOKEN_CATALOG);
+  const createTokenBalances = useCreateTokenBalances(wallet.address, CREATE_TOKEN_CATALOG);
 
   const [addAmount0, setAddAmount0] = useState('');
   const [addAmount1, setAddAmount1] = useState('');
@@ -1325,6 +1495,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [tokenSelect, setTokenSelect] = useState<TokenSelectSide | null>(null);
   const [rateInverted, setRateInverted] = useState(false);
   const [createPicker, setCreatePicker] = useState<'a' | 'b' | null>(null);
+  const [justCreatedPool, setJustCreatedPool] = useState(false);
 
   const writeInFlightRef = useRef(false);
   const writeLockWalletRef = useRef<string | null>(null);
@@ -2206,6 +2377,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       if (createdPoolAddress) {
         selectPool(createdPoolAddress);
         setLiquidityView('manage');
+        setJustCreatedPool(true);
         setTab('liquidity');
         onNotify(`Pool ${shortenAddress(createdPoolAddress)} created. Seed it with liquidity to enable swaps.`);
       } else {
@@ -2384,7 +2556,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       <h3>Pool found, awaiting liquidity</h3>
       <p>Both reserves must be nonzero before swaps can price. Seed the first position to open trading.</p>
       <div className="dx-gate__actions">
-        <button className="dx-button dx-button--solid" type="button" onClick={() => { setLiquidityView('manage'); setTab('liquidity'); }}>
+        <button className="dx-button dx-button--solid" type="button" onClick={() => { setLiquidityView('manage'); setJustCreatedPool(false); setTab('liquidity'); }}>
           Add liquidity
         </button>
       </div>
@@ -2430,6 +2602,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   onClick={(event) => {
                     event.preventDefault();
                     if (value === 'liquidity') setLiquidityView('overview');
+                    if (value === 'liquidity' || value === 'create') setJustCreatedPool(false);
                     setTab(value);
                   }}
                 >
@@ -2570,8 +2743,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 search={positionSearch}
                 onSearchChange={setPositionSearch}
                 onCreatePosition={() => setFinderOpen(true)}
-                onCreatePool={() => setTab('create')}
-                onManagePool={(address) => { selectPool(address); setLiquidityView('manage'); }}
+                onCreatePool={() => { setJustCreatedPool(false); setTab('create'); }}
+                onManagePool={(address) => { selectPool(address); setLiquidityView('manage'); setJustCreatedPool(false); }}
               />
             )}
 
@@ -2579,13 +2752,47 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
               emptyState || !pool?.valid || !registryReady
                 ? (
                   <>
-                    <button type="button" className="dx-back-link" onClick={() => setLiquidityView('overview')}>← 풀 목록으로</button>
+                    {justCreatedPool && <PoolWizardSteps step={2} />}
+                    <button type="button" className="dx-back-link" onClick={() => { setLiquidityView('overview'); setJustCreatedPool(false); }}>← 풀 목록으로</button>
                     {renderGate()}
                   </>
                 )
                 : (
                   <>
-                    <button type="button" className="dx-back-link" onClick={() => setLiquidityView('overview')}>← 풀 목록으로</button>
+                    {justCreatedPool && <PoolWizardSteps step={2} />}
+                    <button type="button" className="dx-back-link" onClick={() => { setLiquidityView('overview'); setJustCreatedPool(false); }}>← 풀 목록으로</button>
+                    <div className="dx-manage__sidebar">
+                      <div className="dx-manage__pair">
+                        <span className="dx-manage__badges"><TokenBadge token={pool.token0} /><TokenBadge token={pool.token1} /></span>
+                        <div>
+                          <strong>{tokenSymbol(pool.token0)} / {tokenSymbol(pool.token1)}</strong>
+                          <small>SpotPool · {formatFeePpm(pool.feePpm)}</small>
+                        </div>
+                      </div>
+                      <dl className="dx-manage__stats">
+                        <div><dt>현재 가격</dt><dd>{formatPriceX18(pool.spotPriceX18 ?? pool.reservePriceX18, pool.token0, pool.token1)}</dd></div>
+                        <div><dt>TVL</dt><dd>{poolTvlUsd(pool) === null ? `${formatTokenValue(pool.reserves?.reserve0 ?? null, pool.token0)} / ${formatTokenValue(pool.reserves?.reserve1 ?? null, pool.token1)}` : formatUsd(poolTvlUsd(pool))}</dd></div>
+                        <div><dt>24시간 거래량</dt><dd>{EMPTY}</dd></div>
+                        <div><dt>24시간 수수료</dt><dd>{EMPTY}</dd></div>
+                        <div><dt>1일 APR</dt><dd>{EMPTY}</dd></div>
+                      </dl>
+                    </div>
+                    <div className="dx-range-head">
+                      <h3>가격 범위 설정</h3>
+                      <div className="dx-chip-row" role="tablist">
+                        <button type="button" className="dx-chip dx-chip--active" role="tab" aria-selected="true">전체 범위</button>
+                        <button type="button" className="dx-chip" role="tab" aria-selected="false" disabled title="이 풀은 항상 전체 구간(full range)만 지원합니다.">
+                          사용자 지정 범위
+                        </button>
+                      </div>
+                    </div>
+                    <p className="dx-note">전체 범위 유동성 공급은 모든 가격대에서 지속적으로 시장에 참여합니다. 이 풀은 구간을 나눠 공급하는 concentrated range를 지원하지 않아 항상 전체 범위로 예치돼요.</p>
+                    <LivePriceChart
+                      prices={chartSamples}
+                      currentPrice={chartPoolReady ? spotForRate : null}
+                      token0={pool.token0}
+                      token1={pool.token1}
+                    />
                     <div className="dx-position">
                       <div>
                         <span>Your LP shares</span>
@@ -2863,7 +3070,10 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
             )}
 
             {tab === 'create' && (
-              <form className="dx-form" onSubmit={handleCreatePool}>
+              <>
+                <PoolWizardBreadcrumb onBack={() => { setLiquidityView('overview'); setTab('liquidity'); }} />
+                <PoolWizardSteps step={1} />
+                <form className="dx-form" onSubmit={handleCreatePool}>
                 <p className="dx-note dx-note--lead">
                   <code>DexRegistry.createSpotPool</code> deploys the pool through SpotPoolFactory and opens the matching Orderbook in one transaction. The registry sorts the pair.
                 </p>
@@ -2873,6 +3083,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   <CreateAddressField
                     value={createTokenA}
                     tokens={createTokenCatalog}
+                    balances={createTokenBalances}
                     excludeAddress={createTokenBAddress}
                     open={createPicker === 'a'}
                     onOpenChange={(next) => setCreatePicker(next ? 'a' : null)}
@@ -2885,6 +3096,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   <CreateAddressField
                     value={createTokenB}
                     tokens={createTokenCatalog}
+                    balances={createTokenBalances}
                     excludeAddress={createTokenAAddress}
                     open={createPicker === 'b'}
                     onOpenChange={(next) => setCreatePicker(next ? 'b' : null)}
@@ -2893,6 +3105,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   <small>{createTokenB && createTokenBAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
                 </label>
 
+                <div className="dx-field__top"><b>수수료 등급</b><i>유동성 공급으로 얻는 금액입니다.</i></div>
                 <div className="dx-fee-picker" role="group" aria-label="LP fee tier">
                   {FEE_PRESETS.map((preset) => (
                     <button
@@ -2907,38 +3120,41 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   ))}
                 </div>
 
-                <div className="dx-field-grid">
-                  <label className="dx-field">
-                    <span className="dx-field__top"><b>LP fee (ppm)</b></span>
-                    <div className="dx-field__row">
-                      <input
-                        value={createFeePpm}
-                        onChange={(event) => { setCreateFeePpm(event.target.value); setActionError(null); }}
-                        inputMode="numeric"
-                        autoComplete="off"
-                      />
-                    </div>
-                    <small>
-                      {createFee === null
-                        ? 'Whole ppm value only.'
-                        : !createFeeWithinLimit
-                          ? `Above the registry ceiling of ${formatPpmLimit(dex.registryWiring.maxLpFeeRatePpm)}.`
-                          : `${formatFeePpm(createFee)} per swap, fixed at creation.`}
-                    </small>
-                  </label>
-                  <label className="dx-field">
-                    <span className="dx-field__top"><b>Book tick size</b></span>
-                    <div className="dx-field__row">
-                      <input
-                        value={createTickSize}
-                        onChange={(event) => { setCreateTickSize(event.target.value); setActionError(null); }}
-                        inputMode="numeric"
-                        autoComplete="off"
-                      />
-                    </div>
-                    <small>{createTick === null || createTick === 0n ? 'Whole number above zero.' : 'Minimum price increment on the shared book.'}</small>
-                  </label>
-                </div>
+                <details className="dx-details">
+                  <summary>고급 설정 <span>수수료 ppm · 북 틱 사이즈</span></summary>
+                  <div className="dx-field-grid">
+                    <label className="dx-field">
+                      <span className="dx-field__top"><b>LP fee (ppm)</b></span>
+                      <div className="dx-field__row">
+                        <input
+                          value={createFeePpm}
+                          onChange={(event) => { setCreateFeePpm(event.target.value); setActionError(null); }}
+                          inputMode="numeric"
+                          autoComplete="off"
+                        />
+                      </div>
+                      <small>
+                        {createFee === null
+                          ? 'Whole ppm value only.'
+                          : !createFeeWithinLimit
+                            ? `Above the registry ceiling of ${formatPpmLimit(dex.registryWiring.maxLpFeeRatePpm)}.`
+                            : `${formatFeePpm(createFee)} per swap, fixed at creation.`}
+                      </small>
+                    </label>
+                    <label className="dx-field">
+                      <span className="dx-field__top"><b>Book tick size</b></span>
+                      <div className="dx-field__row">
+                        <input
+                          value={createTickSize}
+                          onChange={(event) => { setCreateTickSize(event.target.value); setActionError(null); }}
+                          inputMode="numeric"
+                          autoComplete="off"
+                        />
+                      </div>
+                      <small>{createTick === null || createTick === 0n ? 'Whole number above zero.' : 'Minimum price increment on the shared book.'}</small>
+                    </label>
+                  </div>
+                </details>
 
                 <div className="dx-pairbox">
                   <span>DERIVED PAIR ID</span>
@@ -2952,7 +3168,8 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 <p className="dx-note">
                   Creation is simulated against the live registry first — duplicate pairs, fees above the ceiling, or zero ticks are reported before your wallet opens.
                 </p>
-              </form>
+                </form>
+              </>
             )}
           </div>
 

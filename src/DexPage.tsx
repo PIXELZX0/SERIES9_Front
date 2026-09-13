@@ -46,6 +46,7 @@ import {
 } from './chain.ts';
 import { useDex, type DexOpenOrder, type DexPoolSnapshot, type DexToken } from './useDex.ts';
 import { dexHref, useDexSection, type DexTab } from './useDexRoute.ts';
+import { usePoolPositions, type PoolOverview, type PoolPosition } from './usePoolPositions.ts';
 import type { WalletState } from './useWallet.ts';
 
 type NotificationKind = 'success' | 'error';
@@ -298,6 +299,30 @@ function formatPpmLimit(value: bigint | null): string {
   return value === null ? EMPTY : `${formatUnits(value, 4, 3)}% max`;
 }
 
+function formatUsd(value: number | null): string {
+  if (value === null) return EMPTY;
+  if (value > 0 && value < 0.01) return '<US$0.01';
+  return `US$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatAgo(timestamp: number | null): string {
+  if (timestamp === null) return EMPTY;
+  const diffMs = Date.now() - timestamp;
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diffMs < minute) return '방금 전';
+  if (diffMs < hour) return `${Math.floor(diffMs / minute)}분 전`;
+  if (diffMs < day) return `${Math.floor(diffMs / hour)}시간 전`;
+  return `${Math.floor(diffMs / day)}일 전`;
+}
+
+/** Displays SER9 first when it's part of the pair, matching how the rest of the DEX labels pairs. */
+function orderForDisplay(token0: DexToken, token1: DexToken): [DexToken, DexToken] {
+  if (token1.symbol === 'SER9' && token0.symbol !== 'SER9') return [token1, token0];
+  return [token0, token1];
+}
+
 function parseTokenAmount(value: string, decimals: number | null): bigint | null {
   if (decimals === null) return null;
   const trimmed = value.trim();
@@ -495,6 +520,23 @@ function SearchIcon() {
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <circle cx="10.5" cy="10.5" r="6.5" />
       <line x1="16" y1="16" x2="21" y2="21" />
+    </svg>
+  );
+}
+
+function DropletIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 2s7 8.05 7 13a7 7 0 1 1-14 0c0-4.95 7-13 7-13Z" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
     </svg>
   );
 }
@@ -965,6 +1007,178 @@ function MetricCard({ label, value, note }: { label: string; value: string; note
   );
 }
 
+type PoolFilter = 'all' | 'in-range' | 'out-of-range';
+
+type PoolOverviewProps = {
+  connected: boolean;
+  overview: PoolOverview;
+  filter: PoolFilter;
+  onFilterChange: (value: PoolFilter) => void;
+  search: string;
+  onSearchChange: (value: string) => void;
+  onCreatePosition: () => void;
+  onCreatePool: () => void;
+  onManagePool: (address: string) => void;
+};
+
+function PoolOverviewSection({
+  connected,
+  overview,
+  filter,
+  onFilterChange,
+  search,
+  onSearchChange,
+  onCreatePosition,
+  onCreatePool,
+  onManagePool,
+}: PoolOverviewProps) {
+  const query = search.trim().toLowerCase();
+  const filtered = filter === 'out-of-range'
+    ? [] // full-range-only AMM: every open position is always "in range"
+    : overview.positions.filter((position) => {
+      if (!query) return true;
+      const [display0, display1] = orderForDisplay(position.token0, position.token1);
+      const symbols = `${tokenSymbol(display0)} ${tokenSymbol(display1)}`.toLowerCase();
+      return symbols.includes(query) || position.poolAddress.toLowerCase().includes(query);
+    });
+
+  const emptyMessage = !connected
+    ? '지갑을 연결하면 보유한 포지션을 확인할 수 있어요.'
+    : overview.loading && overview.positions.length === 0
+      ? '온체인에서 포지션을 읽는 중…'
+      : overview.error
+        ? overview.error
+        : overview.positions.length === 0
+          ? '아직 공급한 유동성이 없어요.'
+          : filter === 'out-of-range'
+            ? '이 풀들은 항상 전체 구간(0 → ∞)이라 범위 밖 포지션이 없어요.'
+            : '조건에 맞는 포지션이 없어요.';
+
+  return (
+    <div className="dx-pool-overview">
+      <div className="dx-pool-overview__head">
+        <div>
+          <h2>유동성을 공급하고<br />수수료를 획득하세요</h2>
+          <p>최대 유동성 프로토콜에 기여하고 보상을 받으세요</p>
+        </div>
+        <div className="dx-pool-overview__actions">
+          <button type="button" className="dx-button dx-button--solid" onClick={onCreatePosition}>
+            <DropletIcon /> 포지션 생성
+          </button>
+          <button type="button" className="dx-button dx-button--ghost" onClick={onCreatePool}>
+            <PlusIcon /> 풀 생성
+          </button>
+          <button type="button" className="dx-button dx-button--ghost" disabled title="곧 지원 예정">
+            <PlusIcon /> 토큰 출시
+          </button>
+        </div>
+      </div>
+
+      <div className="dx-pool-stats">
+        <div className="dx-pool-stat">
+          <span>총 유동성</span>
+          <strong>{formatUsd(overview.totalValueUsd)}</strong>
+        </div>
+        <div className="dx-pool-stat">
+          <div className="dx-pool-stat__label">
+            <span>총 수수료</span>
+            <button type="button" className="dx-pool-stat__claim" disabled>수령</button>
+          </div>
+          <strong>{formatUsd(overview.totalFeeUsd)}</strong>
+        </div>
+        <div className="dx-pool-stat">
+          <div className="dx-pool-stat__label">
+            <span>총 보상</span>
+            <button type="button" className="dx-pool-stat__claim" disabled>수령</button>
+          </div>
+          <strong>{formatUsd(0)}</strong>
+        </div>
+      </div>
+
+      <h3 className="dx-pool-overview__subhead">내 포지션</h3>
+
+      <div className="dx-pool-toolbar">
+        <div className="dx-chip-row">
+          {(['all', 'in-range', 'out-of-range'] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={`dx-chip${filter === value ? ' dx-chip--active' : ''}`}
+              onClick={() => onFilterChange(value)}
+            >
+              {value === 'all' ? '전체' : value === 'in-range' ? '범위 내' : '범위 밖'}
+            </button>
+          ))}
+        </div>
+        <label className="dx-pool-search">
+          <SearchIcon />
+          <input
+            value={search}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="풀 검색"
+            spellCheck="false"
+            autoComplete="off"
+          />
+        </label>
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="dx-empty-line">{emptyMessage}</p>
+      ) : (
+        <div className="dx-pool-table" role="table" aria-label="내 포지션">
+          <div className="dx-pool-row dx-pool-row--head" role="row">
+            <span role="columnheader">풀</span>
+            <span role="columnheader">포지션</span>
+            <span role="columnheader">분포</span>
+            <span role="columnheader">가치</span>
+            <span role="columnheader">수수료</span>
+            <span role="columnheader">APR</span>
+            <span role="columnheader">생성일</span>
+          </div>
+          {filtered.map((position) => (
+            <PoolPositionRow key={position.poolAddress} position={position} onManage={() => onManagePool(position.poolAddress)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PoolPositionRow({ position, onManage }: { position: PoolPosition; onManage: () => void }) {
+  const [display0, display1] = orderForDisplay(position.token0, position.token1);
+  const flipped = display0 !== position.token0;
+  const leftPct = flipped
+    ? position.distribution0Pct === null ? 50 : 100 - position.distribution0Pct
+    : position.distribution0Pct ?? 50;
+
+  return (
+    <button type="button" className="dx-pool-row" role="row" onClick={onManage}>
+      <span className="dx-pool-row__pair" role="cell">
+        <span className="dx-pool-row__badges">
+          <TokenBadge token={display0} />
+          <TokenBadge token={display1} />
+        </span>
+        <span>
+          <strong>{tokenSymbol(display0)} / {tokenSymbol(display1)}</strong>
+          <small>{formatFeePpm(position.feePpm)}</small>
+        </span>
+      </span>
+      <span className="dx-pool-row__range" role="cell">
+        <span>0 → ∞ {tokenSymbol(display1)}</span>
+        <small className="dx-pool-row__status"><i /> 범위 내</small>
+      </span>
+      <span className="dx-pool-row__distribution" role="cell">
+        <span className="dx-pool-row__bar"><span style={{ width: `${leftPct}%` }} /></span>
+        <small>{Math.round(leftPct)}% {tokenSymbol(display0)} · {Math.round(100 - leftPct)}% {tokenSymbol(display1)}</small>
+      </span>
+      <span role="cell">{formatUsd(position.valueUsd)}</span>
+      <span role="cell">{formatUsd(position.feeEstimateUsd)}</span>
+      <span role="cell">{position.aprEstimatePct === null ? EMPTY : `${position.aprEstimatePct.toFixed(2)}%`}</span>
+      <span role="cell">{formatAgo(position.firstSeenAt)}</span>
+    </button>
+  );
+}
+
 function priceChartRatio(value: bigint, min: bigint, max: bigint): number {
   if (max <= min) return 0.5;
 
@@ -1085,6 +1299,11 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [finderTokenA, setFinderTokenA] = useState('');
   const [finderTokenB, setFinderTokenB] = useState('');
   const [finder, setFinder] = useState<PoolFinderState>(IDLE_POOL_FINDER);
+
+  const [liquidityView, setLiquidityView] = useState<'overview' | 'manage'>('overview');
+  const [positionFilter, setPositionFilter] = useState<'all' | 'in-range' | 'out-of-range'>('all');
+  const [positionSearch, setPositionSearch] = useState('');
+  const poolOverview = usePoolPositions(wallet.address, CREATE_TOKEN_CATALOG);
 
   const [addAmount0, setAddAmount0] = useState('');
   const [addAmount1, setAddAmount1] = useState('');
@@ -1986,6 +2205,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     if (created) {
       if (createdPoolAddress) {
         selectPool(createdPoolAddress);
+        setLiquidityView('manage');
         setTab('liquidity');
         onNotify(`Pool ${shortenAddress(createdPoolAddress)} created. Seed it with liquidity to enable swaps.`);
       } else {
@@ -2164,7 +2384,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
       <h3>Pool found, awaiting liquidity</h3>
       <p>Both reserves must be nonzero before swaps can price. Seed the first position to open trading.</p>
       <div className="dx-gate__actions">
-        <button className="dx-button dx-button--solid" type="button" onClick={() => setTab('liquidity')}>
+        <button className="dx-button dx-button--solid" type="button" onClick={() => { setLiquidityView('manage'); setTab('liquidity'); }}>
           Add liquidity
         </button>
       </div>
@@ -2209,6 +2429,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   aria-current={tab === value ? 'page' : undefined}
                   onClick={(event) => {
                     event.preventDefault();
+                    if (value === 'liquidity') setLiquidityView('overview');
                     setTab(value);
                   }}
                 >
@@ -2340,11 +2561,31 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                   )
             )}
 
-            {tab === 'liquidity' && (
+            {tab === 'liquidity' && liquidityView === 'overview' && (
+              <PoolOverviewSection
+                connected={Boolean(wallet.address)}
+                overview={poolOverview}
+                filter={positionFilter}
+                onFilterChange={setPositionFilter}
+                search={positionSearch}
+                onSearchChange={setPositionSearch}
+                onCreatePosition={() => setFinderOpen(true)}
+                onCreatePool={() => setTab('create')}
+                onManagePool={(address) => { selectPool(address); setLiquidityView('manage'); }}
+              />
+            )}
+
+            {tab === 'liquidity' && liquidityView === 'manage' && (
               emptyState || !pool?.valid || !registryReady
-                ? renderGate()
+                ? (
+                  <>
+                    <button type="button" className="dx-back-link" onClick={() => setLiquidityView('overview')}>← 풀 목록으로</button>
+                    {renderGate()}
+                  </>
+                )
                 : (
                   <>
+                    <button type="button" className="dx-back-link" onClick={() => setLiquidityView('overview')}>← 풀 목록으로</button>
                     <div className="dx-position">
                       <div>
                         <span>Your LP shares</span>
@@ -2774,6 +3015,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
           activePoolAddress={activePoolAddress}
           onSelectPool={(address) => {
             selectPool(address);
+            if (tab === 'liquidity') setLiquidityView('manage');
             setFinderOpen(false);
           }}
           onClose={() => setFinderOpen(false)}

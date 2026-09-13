@@ -135,7 +135,6 @@ summary:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  width: 100%;
   padding: 12px 15px;
   border: 1px solid color-mix(in srgb, var(--gold) 35%, transparent);
   border-left: 1px solid var(--gold);
@@ -144,11 +143,23 @@ summary:focus-visible {
   line-height: 1.5;
 }
 
+.dx-unresolved {
+  width: 100%;
+}
+
 .dx-alert {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  width: auto;
+  max-width: min(390px, calc(100vw - 40px));
   border-color: color-mix(in srgb, var(--gold) 35%, transparent);
   border-left-color: var(--gold-bright);
-  background: color-mix(in srgb, var(--gold) 8%, transparent);
+  background: var(--surface-2);
+  box-shadow: 0 18px 55px rgba(0, 0, 0, .28);
   color: var(--text);
+  animation: toast-in 260ms var(--ease-out) both;
 }
 
 .dx-alert > span,

@@ -894,6 +894,8 @@ function App() {
   const [mintEntityType, setMintEntityType] = useState<'human' | 'ai'>('human');
   const [profileName, setProfileName] = useState('');
   const [profileBio, setProfileBio] = useState('');
+  const [profileHue, setProfileHue] = useState(0);
+  const [profileSaturation, setProfileSaturation] = useState(0);
   const [profileDraftKey, setProfileDraftKey] = useState<string | null>(null);
   const [smartWalletCreatePending, setSmartWalletCreatePending] = useState(false);
   const [identityHandle, setIdentityHandle] = useState('');
@@ -1076,8 +1078,10 @@ function App() {
     profileDraftKeyRef.current = accountIdentityKey;
     setProfileName(account.name ?? '');
     setProfileBio(account.bio ?? '');
+    setProfileHue(account.hue === null ? 0 : Number(account.hue));
+    setProfileSaturation(account.saturation === null ? 0 : Number(account.saturation));
     setProfileDraftKey(accountIdentityKey);
-  }, [account.bio, account.loading, account.name, account.profileReadReady, account.readStatus, accountIdentityKey]);
+  }, [account.bio, account.hue, account.loading, account.name, account.profileReadReady, account.readStatus, account.saturation, accountIdentityKey]);
 
   useEffect(() => {
     const pendingKey = smartWalletCreateKeyRef.current;
@@ -1530,7 +1534,7 @@ function App() {
 
     await sendAndWait('Update profile', {
       to: CONTRACTS.identity,
-      data: encodeUpdateProfile(account.tokenId, name, bio, account.hue, account.saturation),
+      data: encodeUpdateProfile(account.tokenId, name, bio, profileHue, profileSaturation),
     });
   }
 
@@ -2354,7 +2358,27 @@ function App() {
                        <span>Bio <i className={utf8ByteLength(profileBio) > 128 ? 'is-invalid' : undefined}>{utf8ByteLength(profileBio)} / 128 bytes</i></span>
                        <textarea value={profileBio} maxLength={128} onChange={(event) => setProfileBio(event.target.value)} placeholder="A short line about your signal" rows={4} />
                      </label>
-                     <p className="workspace-form__note">Name and BIO are written onchain. Current hue and saturation are preserved from the profile read; nothing is saved locally.</p>
+                     <div className="workspace-field workspace-field--profile-picture">
+                       <span>Profile picture (hue / saturation)</span>
+                       <div className="profile-picture-controls">
+                         <span
+                           className="profile-picture-swatch"
+                           aria-hidden="true"
+                           style={{ background: `hsl(${(profileHue / 255) * 360}, ${(profileSaturation / 255) * 100}%, 50%)` }}
+                         />
+                         <div className="profile-picture-sliders">
+                           <label>
+                             <span>Hue <i>{profileHue}</i></span>
+                             <input type="range" min={0} max={255} value={profileHue} onChange={(event) => setProfileHue(Number(event.target.value))} />
+                           </label>
+                           <label>
+                             <span>Saturation <i>{profileSaturation}</i></span>
+                             <input type="range" min={0} max={255} value={profileSaturation} onChange={(event) => setProfileSaturation(Number(event.target.value))} />
+                           </label>
+                         </div>
+                       </div>
+                     </div>
+                     <p className="workspace-form__note">Name, BIO, and the artwork's hue/saturation are written onchain. Nothing is saved locally.</p>
                       <button className="workspace-button workspace-button--gold" type="submit" disabled={!profileDraftReady || !profileName.trim() || utf8ByteLength(profileName) > 32 || utf8ByteLength(profileBio) > 128 || wallet.connecting || wallet.switching || actionLabel !== null || unresolvedSubmittedTransaction !== null || account.hue === null || account.saturation === null}>
                        {actionLabel ?? 'Update profile'} <ButtonArrow />
                      </button>

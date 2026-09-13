@@ -24,6 +24,7 @@ import {
   encodeSwapExactIn,
   encodeWithdraw,
   dexCall,
+  decodeDexReserves,
   decodeDexUint,
   monWrapShortfall,
   normalizeDexAddress,
@@ -32,7 +33,7 @@ import {
   spendableBalance,
   wrappableMon,
 } from './dex.ts';
-import { computePairId } from './keccak.ts';
+import { computePairId, sortTokenPair } from './keccak.ts';
 import {
   CONTRACTS,
   TOKENS,
@@ -84,6 +85,8 @@ type PoolFinderState = {
   pairId: string | null;
   pools: string[];
   error: string | null;
+  tokenA: string | null;
+  tokenB: string | null;
 };
 
 type PriceHistoryState = {
@@ -96,7 +99,7 @@ const UINT256_LIMIT = 2n ** 256n;
 const UNRESOLVED_TRANSACTION_STORAGE_KEY = 'series9:unresolved-submitted-transactions';
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
-const IDLE_POOL_FINDER: PoolFinderState = { status: 'idle', pairId: null, pools: [], error: null };
+const IDLE_POOL_FINDER: PoolFinderState = { status: 'idle', pairId: null, pools: [], error: null, tokenA: null, tokenB: null };
 
 const TABS: Array<[DexTab, string]> = [
   ['swap', 'Swap'],
@@ -330,15 +333,30 @@ function formatUsd(value: number | null): string {
 }
 
 /** TVL in USD when one side of the pool is USDC — a constant-product pool always splits value 50/50, so double the USDC side. Null when neither token is USDC. */
-function poolTvlUsd(pool: DexPoolSnapshot | null): number | null {
-  if (!pool?.reserves || !pool.token0 || !pool.token1) return null;
-  const usdcSide = pool.token0.symbol === 'USDC'
-    ? { token: pool.token0, reserve: pool.reserves.reserve0 }
-    : pool.token1.symbol === 'USDC'
-      ? { token: pool.token1, reserve: pool.reserves.reserve1 }
+function reservesTvlUsd(
+  token0: DexToken | null,
+  token1: DexToken | null,
+  reserves: { reserve0: bigint; reserve1: bigint } | null,
+): number | null {
+  if (!reserves || !token0 || !token1) return null;
+  const usdcSide = token0.symbol === 'USDC'
+    ? { token: token0, reserve: reserves.reserve0 }
+    : token1.symbol === 'USDC'
+      ? { token: token1, reserve: reserves.reserve1 }
       : null;
   if (!usdcSide || usdcSide.token.decimals === null) return null;
   return (Number(usdcSide.reserve) / 10 ** usdcSide.token.decimals) * 2;
+}
+
+function poolTvlUsd(pool: DexPoolSnapshot | null): number | null {
+  if (!pool) return null;
+  return reservesTvlUsd(pool.token0, pool.token1, pool.reserves);
+}
+
+/** Resolves a pasted/typed address to catalog metadata (symbol/decimals) when known, else a bare address token. */
+function lookupCatalogToken(address: string): DexToken {
+  const known = CREATE_TOKEN_CATALOG.find((token) => token.address.toLowerCase() === address.toLowerCase());
+  return known ?? { address, symbol: null, decimals: null };
 }
 
 function formatAgo(timestamp: number | null): string {
@@ -403,26 +421,6 @@ function parsePriceToX18(value: string, baseDecimals: number | null, quoteDecima
   const scale = PRICE_X18_EXPONENT + quoteDecimals - baseDecimals;
   if (scale < 0 || scale > 77) return null;
   return parseTokenAmount(value, scale);
-}
-
-/**
- * Uniswap has no unauthenticated price endpoint (the official Trading API
- * needs a server-side x-api-key). CoinGecko's contract-price lookup is the
- * closest no-key equivalent for a reference market price.
- */
-async function fetchExternalTokenPricesUsd(addresses: string[], signal?: AbortSignal): Promise<Record<string, number>> {
-  const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase())));
-  if (unique.length === 0) return {};
-  const url = `https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses=${unique.join(',')}&vs_currencies=usd`;
-  const response = await fetch(url, { signal });
-  if (!response.ok) throw new Error(`Reference price lookup failed (HTTP ${response.status}).`);
-  const payload = (await response.json()) as Record<string, { usd?: number } | undefined>;
-  const prices: Record<string, number> = {};
-  for (const address of unique) {
-    const usd = payload[address]?.usd;
-    if (typeof usd === 'number') prices[address] = usd;
-  }
-  return prices;
 }
 
 function orderEscrow(side: OrderSide, priceX18: bigint, amount: bigint): bigint {
@@ -1157,6 +1155,54 @@ function PoolFinderDialog({
   );
 }
 
+/** One row in the "pick a pool" list: pair badges + on-chain TVL, fetched lazily per address. */
+function PoolPickRow({
+  address,
+  token0,
+  token1,
+  onSelect,
+}: {
+  address: string;
+  token0: DexToken;
+  token1: DexToken;
+  onSelect: () => void;
+}) {
+  const [tvlUsd, setTvlUsd] = useState<number | null | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    rpcBatch([dexCall(address, encodeDexNoArgs(DEX_SELECTOR.getReserves))], controller.signal)
+      .then(([result]) => {
+        if (cancelled) return;
+        setTvlUsd(reservesTvlUsd(token0, token1, decodeDexReserves(result)));
+      })
+      .catch(() => { if (!cancelled) setTvlUsd(null); });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [address, token0, token1]);
+
+  const [display0, display1] = orderForDisplay(token0, token1);
+
+  return (
+    <button type="button" className="dx-pool-row dx-pool-row--pick" role="row" onClick={onSelect}>
+      <span className="dx-pool-row__pair" role="cell">
+        <span className="dx-pool-row__badges">
+          <TokenBadge token={display0} />
+          <TokenBadge token={display1} />
+        </span>
+        <span>
+          <strong>{tokenSymbol(display0)} / {tokenSymbol(display1)}</strong>
+          <small>{shortenAddress(address)}</small>
+        </span>
+      </span>
+      <span role="cell">{tvlUsd === undefined ? '읽는 중…' : formatUsd(tvlUsd)}</span>
+    </button>
+  );
+}
+
 function MetricCard({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
     <div className="dx-metric">
@@ -1167,31 +1213,34 @@ function MetricCard({ label, value, note }: { label: string; value: string; note
   );
 }
 
-function PoolWizardBreadcrumb({ onBack }: { onBack: () => void }) {
+function PoolWizardBreadcrumb({ current, onBack }: { current: string; onBack: () => void }) {
   return (
     <nav className="dx-breadcrumb" aria-label="Breadcrumb">
       <button type="button" onClick={onBack}>내 포지션</button>
       <span aria-hidden="true">›</span>
-      <span aria-current="page">풀 생성</span>
+      <span aria-current="page">{current}</span>
     </nav>
   );
 }
 
-function PoolWizardSteps({ step }: { step: 1 | 2 }) {
+const POOL_CREATE_STEP_LABELS: [string, string] = ['토큰 페어 및 수수료 선택', '초기 유동성 예치'];
+const POSITION_ADD_STEP_LABELS: [string, string] = ['풀 선택', '가격 범위 및 예치 수량 설정'];
+
+function PoolWizardSteps({ step, labels = POOL_CREATE_STEP_LABELS }: { step: 1 | 2; labels?: [string, string] }) {
   return (
     <ol className="dx-wizard-steps">
       <li className={`dx-wizard-steps__item${step === 1 ? ' dx-wizard-steps__item--active' : ' dx-wizard-steps__item--done'}`}>
         <span>1</span>
         <div>
           <b>1단계</b>
-          <strong>토큰 페어 및 수수료 선택</strong>
+          <strong>{labels[0]}</strong>
         </div>
       </li>
       <li className={`dx-wizard-steps__item${step === 2 ? ' dx-wizard-steps__item--active' : ''}`}>
         <span>2</span>
         <div>
           <b>2단계</b>
-          <strong>초기 유동성 예치</strong>
+          <strong>{labels[1]}</strong>
         </div>
       </li>
     </ol>
@@ -1490,8 +1539,9 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const [finderTokenA, setFinderTokenA] = useState('');
   const [finderTokenB, setFinderTokenB] = useState('');
   const [finder, setFinder] = useState<PoolFinderState>(IDLE_POOL_FINDER);
+  const [addPicker, setAddPicker] = useState<'a' | 'b' | null>(null);
 
-  const [liquidityView, setLiquidityView] = useState<'overview' | 'manage'>('overview');
+  const [liquidityView, setLiquidityView] = useState<'overview' | 'add' | 'manage'>('overview');
   const [positionFilter, setPositionFilter] = useState<'all' | 'in-range' | 'out-of-range'>('all');
   const [positionSearch, setPositionSearch] = useState('');
   const poolOverview = usePoolPositions(wallet.address, CREATE_TOKEN_CATALOG);
@@ -1499,11 +1549,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
   const [addAmount0, setAddAmount0] = useState('');
   const [addAmount1, setAddAmount1] = useState('');
-  const [referenceAddress0, setReferenceAddress0] = useState('');
-  const [referenceAddress1, setReferenceAddress1] = useState('');
-  const [referencePrices, setReferencePrices] = useState<Record<string, number>>({});
-  const [referencePriceLoading, setReferencePriceLoading] = useState(false);
-  const [referencePriceError, setReferencePriceError] = useState<string | null>(null);
   const [liquidityTolerance, setLiquidityTolerance] = useState('1');
   const [removePercent, setRemovePercent] = useState<number>(50);
 
@@ -1614,13 +1659,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   const amount0In = parseTokenAmount(addAmount0, pool?.token0?.decimals ?? null);
   const amount1In = parseTokenAmount(addAmount1, pool?.token1?.decimals ?? null);
   const poolRatioReady = pool?.reserves != null && pool.reserves.reserve0 > 0n && pool.reserves.reserve1 > 0n;
-  const referenceAddress0Normalized = normalizeDexAddress(referenceAddress0);
-  const referenceAddress1Normalized = normalizeDexAddress(referenceAddress1);
-  const referencePrice0 = referenceAddress0Normalized ? referencePrices[referenceAddress0Normalized.toLowerCase()] ?? null : null;
-  const referencePrice1 = referenceAddress1Normalized ? referencePrices[referenceAddress1Normalized.toLowerCase()] ?? null : null;
-  const referenceRatio = referencePrice0 !== null && referencePrice1 !== null && referencePrice1 !== 0
-    ? referencePrice0 / referencePrice1
-    : null;
   const approvalRequired0 = amount0In !== null && (walletToken0?.allowance == null || amount0In > walletToken0.allowance);
   const approvalRequired1 = amount1In !== null && (walletToken1?.allowance == null || amount1In > walletToken1.allowance);
   const wrap0 = monWrapShortfall(pool?.token0 ?? null, walletToken0?.balance, amount0In, nativeBalance);
@@ -1783,44 +1821,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     return () => controller.abort();
   }, [inputAmount, poolReady, quoteRequestKey, readSpotQuote, tokenIn, tokenOut]);
 
-  useEffect(() => {
-    const addresses = [referenceAddress0Normalized, referenceAddress1Normalized].filter(
-      (address): address is string => address !== null,
-    );
-    if (addresses.length === 0) {
-      const timer = setTimeout(() => {
-        setReferencePrices({});
-        setReferencePriceError(null);
-        setReferencePriceLoading(false);
-      }, 0);
-      return () => clearTimeout(timer);
-    }
-
-    const controller = new AbortController();
-    const loadingTimer = setTimeout(() => setReferencePriceLoading(true), 0);
-    const timer = setTimeout(() => {
-      void fetchExternalTokenPricesUsd(addresses, controller.signal)
-        .then((prices) => {
-          if (controller.signal.aborted) return;
-          setReferencePrices(prices);
-          setReferencePriceError(Object.keys(prices).length === 0 ? 'No reference price found for that address.' : null);
-          setReferencePriceLoading(false);
-        })
-        .catch((error: unknown) => {
-          if (controller.signal.aborted) return;
-          setReferencePrices({});
-          setReferencePriceError(error instanceof Error ? error.message : 'Reference price lookup failed.');
-          setReferencePriceLoading(false);
-        });
-    }, 400);
-
-    return () => {
-      clearTimeout(loadingTimer);
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [referenceAddress0Normalized, referenceAddress1Normalized]);
-
   function notifyError(message: string) {
     setActionError(message);
     onNotify(message, 'error');
@@ -1891,30 +1891,34 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     if (dex.error !== null) setDismissedDexError(dex.error);
   }
 
-  async function handleFindPools(event: FormEvent<HTMLFormElement>) {
+  function handleFindPools(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    void runFinderLookup();
+  }
+
+  async function runFinderLookup() {
     const tokenA = normalizeDexAddress(finderTokenA);
     const tokenB = normalizeDexAddress(finderTokenB);
     if (!tokenA || !tokenB) {
-      setFinder({ status: 'error', pairId: null, pools: [], error: 'Both fields need a valid 20-byte token address.' });
+      setFinder({ status: 'error', pairId: null, pools: [], error: 'Both fields need a valid 20-byte token address.', tokenA, tokenB });
       return;
     }
 
     const pairId = computePairId(tokenA, tokenB);
     if (pairId === null) {
-      setFinder({ status: 'error', pairId: null, pools: [], error: 'A pair needs two different tokens.' });
+      setFinder({ status: 'error', pairId: null, pools: [], error: 'A pair needs two different tokens.', tokenA, tokenB });
       return;
     }
 
-    setFinder({ status: 'loading', pairId, pools: [], error: null });
+    setFinder({ status: 'loading', pairId, pools: [], error: null, tokenA, tokenB });
     try {
       const pools = await readSpotPoolsForPair(pairId);
       if (!mountedRef.current) return;
       if (pools === null) {
-        setFinder({ status: 'error', pairId, pools: [], error: 'The registry did not return a readable pool list.' });
+        setFinder({ status: 'error', pairId, pools: [], error: 'The registry did not return a readable pool list.', tokenA, tokenB });
         return;
       }
-      setFinder({ status: 'done', pairId, pools, error: null });
+      setFinder({ status: 'done', pairId, pools, error: null, tokenA, tokenB });
     } catch (findError: unknown) {
       if (!mountedRef.current) return;
       setFinder({
@@ -1922,9 +1926,20 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
         pairId,
         pools: [],
         error: findError instanceof Error ? findError.message : 'The registry lookup failed.',
+        tokenA,
+        tokenB,
       });
     }
   }
+
+  useEffect(() => {
+    if (liquidityView !== 'add') return;
+    const tokenA = normalizeDexAddress(finderTokenA);
+    const tokenB = normalizeDexAddress(finderTokenB);
+    if (!tokenA || !tokenB || tokenA === tokenB) return;
+    void runFinderLookup();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liquidityView, finderTokenA, finderTokenB]);
 
   async function ensureMonadWallet(): Promise<boolean> {
     if (!wallet.address) {
@@ -2513,21 +2528,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     setAddAmount0(formatUnits(amount1In * reserve0 / reserve1, pool.token0.decimals, pool.token0.decimals));
   }
 
-  function handleUseReferenceRatio() {
-    if (referenceRatio === null || pool?.token0 == null || pool.token1 == null) return;
-    if (pool.token0.decimals === null || pool.token1.decimals === null) return;
-
-    if (amount0In !== null) {
-      const amount0Float = Number(formatUnits(amount0In, pool.token0.decimals, pool.token0.decimals).replace(/,/g, ''));
-      setAddAmount1((amount0Float * referenceRatio).toString());
-      return;
-    }
-    if (amount1In !== null) {
-      const amount1Float = Number(formatUnits(amount1In, pool.token1.decimals, pool.token1.decimals).replace(/,/g, ''));
-      setAddAmount0((amount1Float / referenceRatio).toString());
-    }
-  }
-
   function handleMaxDeposit(side: 'token0' | 'token1') {
     const target = side === 'token0' ? walletToken0 : walletToken1;
     const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
@@ -2829,10 +2829,106 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 onFilterChange={setPositionFilter}
                 search={positionSearch}
                 onSearchChange={setPositionSearch}
-                onCreatePosition={() => setFinderOpen(true)}
+                onCreatePosition={() => { setFinder(IDLE_POOL_FINDER); setFinderTokenA(''); setFinderTokenB(''); setLiquidityView('add'); }}
                 onCreatePool={() => { setJustCreatedPool(false); setTab('create'); }}
                 onManagePool={(address) => { selectPool(address); setLiquidityView('manage'); setJustCreatedPool(false); }}
               />
+            )}
+
+            {tab === 'liquidity' && liquidityView === 'add' && (
+              <>
+                <PoolWizardBreadcrumb current="포지션 생성" onBack={() => setLiquidityView('overview')} />
+                <PoolWizardSteps step={1} labels={POSITION_ADD_STEP_LABELS} />
+
+                <div className="dx-pool-overview__head">
+                  <h2>풀 선택</h2>
+                  <div className="dx-pool-overview__actions">
+                    <button type="button" className="dx-button dx-button--ghost" onClick={() => { setJustCreatedPool(false); setTab('create'); }}>
+                      <PlusIcon /> 풀 생성
+                    </button>
+                  </div>
+                </div>
+
+                <div className="dx-field-grid">
+                  <label className="dx-field dx-field--address">
+                    <span className="dx-field__top"><b>첫 번째 토큰</b></span>
+                    <CreateAddressField
+                      value={finderTokenA}
+                      tokens={createTokenCatalog}
+                      balances={createTokenBalances}
+                      excludeAddress={normalizeDexAddress(finderTokenB)}
+                      open={addPicker === 'a'}
+                      onOpenChange={(next) => setAddPicker(next ? 'a' : null)}
+                      onChange={setFinderTokenA}
+                    />
+                  </label>
+                  <label className="dx-field dx-field--address">
+                    <span className="dx-field__top"><b>두 번째 토큰</b></span>
+                    <CreateAddressField
+                      value={finderTokenB}
+                      tokens={createTokenCatalog}
+                      balances={createTokenBalances}
+                      excludeAddress={normalizeDexAddress(finderTokenA)}
+                      open={addPicker === 'b'}
+                      onOpenChange={(next) => setAddPicker(next ? 'b' : null)}
+                      onChange={setFinderTokenB}
+                    />
+                  </label>
+                </div>
+
+                {finder.error && <p className="dx-finder-error">{finder.error}</p>}
+                {finder.status === 'loading' && <p className="dx-empty-line">레지스트리를 읽는 중…</p>}
+
+                {finder.status === 'done' && finder.tokenA && finder.tokenB && (
+                  finder.pools.length === 0 ? (
+                    <p className="dx-empty-line">이 페어의 SpotPool이 아직 없어요. 직접 풀을 생성해보세요.</p>
+                  ) : (
+                    <div className="dx-pool-table" role="table" aria-label="풀 선택">
+                      <div className="dx-pool-row dx-pool-row--pick dx-pool-row--head" role="row">
+                        <span role="columnheader">풀</span>
+                        <span role="columnheader">TVL</span>
+                      </div>
+                      {finder.pools.map((address) => {
+                        const sorted = sortTokenPair(finder.tokenA!, finder.tokenB!);
+                        if (!sorted) return null;
+                        return (
+                          <PoolPickRow
+                            key={address}
+                            address={address}
+                            token0={lookupCatalogToken(sorted[0])}
+                            token1={lookupCatalogToken(sorted[1])}
+                            onSelect={() => { selectPool(address); setLiquidityView('manage'); }}
+                          />
+                        );
+                      })}
+                    </div>
+                  )
+                )}
+
+                <div className="dx-finder-divider"><span>or paste a pool address</span></div>
+                <label className="dx-finder-address">
+                  <span>Paste a pool address</span>
+                  <div>
+                    <input
+                      value={poolAddressInput}
+                      onChange={(event) => { setPoolAddressInput(event.target.value); setActionError(null); }}
+                      placeholder="0x… deployed SpotPool"
+                      spellCheck="false"
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      className="dx-button dx-button--ghost"
+                      onClick={() => {
+                        handleLoadPool();
+                        if (normalizeDexAddress(poolAddressInput.trim())) setLiquidityView('manage');
+                      }}
+                    >
+                      Load
+                    </button>
+                  </div>
+                </label>
+              </>
             )}
 
             {tab === 'liquidity' && liquidityView === 'manage' && (
@@ -2893,42 +2989,6 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                         </strong>
                         <small>{tokenSymbol(pool?.token0 ?? null)} / {tokenSymbol(pool?.token1 ?? null)}</small>
                       </div>
-                    </div>
-
-                    <div className="dx-setting-row dx-reference-price">
-                      <span>참고 시세 (CoinGecko · Uniswap 풀 공식 API는 서버용 키가 필요해 대체)</span>
-                      <div className="dx-reference-price__inputs">
-                        <input
-                          value={referenceAddress0}
-                          onChange={(event) => setReferenceAddress0(event.target.value)}
-                          placeholder={`${tokenSymbol(pool?.token0 ?? null)} 이더리움 mainnet 주소 (0x…)`}
-                          spellCheck="false"
-                          autoComplete="off"
-                          aria-label={`${tokenSymbol(pool?.token0 ?? null)} reference address`}
-                        />
-                        <input
-                          value={referenceAddress1}
-                          onChange={(event) => setReferenceAddress1(event.target.value)}
-                          placeholder={`${tokenSymbol(pool?.token1 ?? null)} 이더리움 mainnet 주소 (0x…)`}
-                          spellCheck="false"
-                          autoComplete="off"
-                          aria-label={`${tokenSymbol(pool?.token1 ?? null)} reference address`}
-                        />
-                      </div>
-                      <small>
-                        {referencePriceLoading
-                          ? '시세 조회 중…'
-                          : referencePriceError
-                            ? referencePriceError
-                            : referenceRatio !== null
-                              ? `1 ${tokenSymbol(pool?.token0 ?? null)} ≈ ${referenceRatio.toFixed(6)} ${tokenSymbol(pool?.token1 ?? null)} (CoinGecko 기준, 참고용)`
-                              : '두 토큰의 이더리움 주소를 입력하면 CoinGecko 기준 참고 시세를 보여줍니다.'}
-                        {referenceRatio !== null && (
-                          <button type="button" onClick={handleUseReferenceRatio} disabled={amount0In === null && amount1In === null}>
-                            비율 적용
-                          </button>
-                        )}
-                      </small>
                     </div>
 
                     <form className="dx-form" onSubmit={handleAddLiquidity}>
@@ -3194,7 +3254,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
 
             {tab === 'create' && (
               <>
-                <PoolWizardBreadcrumb onBack={() => { setLiquidityView('overview'); setTab('liquidity'); }} />
+                <PoolWizardBreadcrumb current="풀 생성" onBack={() => { setLiquidityView('overview'); setTab('liquidity'); }} />
                 <PoolWizardSteps step={1} />
                 <form className="dx-form" onSubmit={handleCreatePool}>
                 <div className="dx-field-grid">

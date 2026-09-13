@@ -2626,6 +2626,56 @@ a:focus-visible {
   border-color: var(--gold);
 }
 
+.profile-picture-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.profile-picture-swatch {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line);
+}
+
+.profile-picture-sliders {
+  display: grid;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-picture-sliders label {
+  display: grid;
+  gap: 4px;
+}
+
+.profile-picture-sliders label > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+
+.profile-picture-sliders label > span i {
+  color: var(--gold-bright);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.workspace-field input[type="range"] {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  accent-color: var(--gold);
+}
+
 .segmented-control,
 .asset-tabs {
   display: grid;

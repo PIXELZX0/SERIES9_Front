@@ -2512,7 +2512,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
   function handleMaxAmount() {
     const spendable = spendableBalance(tokenIn, walletToken?.balance, nativeBalance);
     if (spendable === null || tokenIn === null || tokenIn.decimals === null) return;
-    setAmountIn(formatUnits(spendable, tokenIn.decimals, tokenIn.decimals));
+    setAmountIn(formatTokenValue(spendable, tokenIn));
   }
 
   function handleMatchRatio(side: 'token0' | 'token1') {
@@ -2533,7 +2533,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
     const token = side === 'token0' ? pool?.token0 ?? null : pool?.token1 ?? null;
     const spendable = spendableBalance(token, target?.balance, nativeBalance);
     if (spendable === null || token?.decimals == null) return;
-    const formatted = formatUnits(spendable, token.decimals, token.decimals);
+    const formatted = formatTokenValue(spendable, token);
     if (side === 'token0') setAddAmount0(formatted);
     else setAddAmount1(formatted);
   }
@@ -3164,7 +3164,7 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                           onAction={() => {
                             const spendable = spendableBalance(baseToken, walletToken0?.balance, nativeBalance);
                             if (spendable === null || baseToken?.decimals == null) return;
-                            setOrderAmount(formatUnits(spendable, baseToken.decimals, baseToken.decimals));
+                            setOrderAmount(formatTokenValue(spendable, baseToken));
                           }}
                           note={`Always denominated in ${tokenSymbol(baseToken)}, the pair's base token.`}
                         />

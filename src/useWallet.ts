@@ -440,6 +440,7 @@ export function useWallet(): WalletState {
     }
 
     const { EthereumProvider } = await import('@walletconnect/ethereum-provider');
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://series9.xyz';
     const provider = (await EthereumProvider.init({
       projectId: WALLETCONNECT_PROJECT_ID,
       chains: [MONAD.id],
@@ -449,8 +450,9 @@ export function useWallet(): WalletState {
       metadata: {
         name: 'SERIES9',
         description: 'SERIES9 identity layer on Monad',
-        url: typeof window !== 'undefined' ? window.location.origin : 'https://series9.xyz',
-        icons: [],
+        url: origin,
+        // Shown as the dapp icon in the connecting wallet's pairing/approval screen.
+        icons: [`${origin}${import.meta.env.BASE_URL}icon-512.svg`],
       },
     })) as unknown as WalletConnectProvider;
 

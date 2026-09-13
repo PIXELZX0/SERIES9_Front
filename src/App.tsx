@@ -867,7 +867,11 @@ function TokenomicsMetric({
 }
 
 function App() {
-  const page = currentPage();
+  // Tracked in state (not read fresh from window.location each render) so internal nav can
+  // switch pages via history.pushState instead of a full reload, which used to drop the
+  // wallet connection (and any WalletConnect session) on every page change.
+  const [pathname, setPathname] = useState(() => window.location.pathname);
+  const page = currentPage(pathname);
   const isHomePage = page === 'home';
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1120,6 +1124,15 @@ function App() {
     return () => window.clearTimeout(timeoutId);
   }, [toast]);
 
+  useEffect(() => {
+    function handlePopState() {
+      setPathname(window.location.pathname);
+    }
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   useLayoutEffect(() => {
     const input = stakingAmountInputRef.current;
     const caretPosition = stakingAmountCaretRef.current;
@@ -1234,6 +1247,27 @@ function App() {
       event.preventDefault();
       announceError('A DEX transaction is still being confirmed. Verify or acknowledge it before leaving this page.');
       return;
+    }
+
+    const anchor = event.currentTarget;
+    const isPlainLeftClick =
+      event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && !anchor.target;
+
+    if (isPlainLeftClick) {
+      const url = new URL(anchor.href, window.location.origin);
+      // A same-page hash link (e.g. #pulse) is left to the browser's native, reload-free jump.
+      // Only a pathname change is intercepted, since that used to force a full reload that
+      // dropped the wallet connection (and any WalletConnect session) on every page switch.
+      if (url.origin === window.location.origin && url.pathname !== window.location.pathname) {
+        event.preventDefault();
+        window.history.pushState(null, '', `${url.pathname}${url.hash}`);
+        setPathname(url.pathname);
+        if (url.hash) {
+          window.requestAnimationFrame(() => document.getElementById(url.hash.slice(1))?.scrollIntoView());
+        } else {
+          window.scrollTo({ top: 0 });
+        }
+      }
     }
 
     const shouldRestoreMenuFocus = menuOpen && window.matchMedia('(max-width: 820px)').matches;

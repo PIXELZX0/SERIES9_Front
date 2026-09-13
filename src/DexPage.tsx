@@ -3074,36 +3074,34 @@ function DexPage({ wallet, onNotify, onActionState }: DexPageProps) {
                 <PoolWizardBreadcrumb onBack={() => { setLiquidityView('overview'); setTab('liquidity'); }} />
                 <PoolWizardSteps step={1} />
                 <form className="dx-form" onSubmit={handleCreatePool}>
-                <p className="dx-note dx-note--lead">
-                  <code>DexRegistry.createSpotPool</code> deploys the pool through SpotPoolFactory and opens the matching Orderbook in one transaction. The registry sorts the pair.
-                </p>
-
-                <label className="dx-field dx-field--address">
-                  <span className="dx-field__top"><b>Token A</b><i>ERC20 on Monad</i></span>
-                  <CreateAddressField
-                    value={createTokenA}
-                    tokens={createTokenCatalog}
-                    balances={createTokenBalances}
-                    excludeAddress={createTokenBAddress}
-                    open={createPicker === 'a'}
-                    onOpenChange={(next) => setCreatePicker(next ? 'a' : null)}
-                    onChange={(value) => { setCreateTokenA(value); setActionError(null); }}
-                  />
-                  <small>{createTokenA && createTokenAAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
-                </label>
-                <label className="dx-field dx-field--address">
-                  <span className="dx-field__top"><b>Token B</b><i>must differ from A</i></span>
-                  <CreateAddressField
-                    value={createTokenB}
-                    tokens={createTokenCatalog}
-                    balances={createTokenBalances}
-                    excludeAddress={createTokenAAddress}
-                    open={createPicker === 'b'}
-                    onOpenChange={(next) => setCreatePicker(next ? 'b' : null)}
-                    onChange={(value) => { setCreateTokenB(value); setActionError(null); }}
-                  />
-                  <small>{createTokenB && createTokenBAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
-                </label>
+                <div className="dx-field-grid">
+                  <label className="dx-field dx-field--address">
+                    <span className="dx-field__top"><b>Token A</b><i>ERC20 on Monad</i></span>
+                    <CreateAddressField
+                      value={createTokenA}
+                      tokens={createTokenCatalog}
+                      balances={createTokenBalances}
+                      excludeAddress={createTokenBAddress}
+                      open={createPicker === 'a'}
+                      onOpenChange={(next) => setCreatePicker(next ? 'a' : null)}
+                      onChange={(value) => { setCreateTokenA(value); setActionError(null); }}
+                    />
+                    <small>{createTokenA && createTokenAAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
+                  </label>
+                  <label className="dx-field dx-field--address">
+                    <span className="dx-field__top"><b>Token B</b><i>must differ from A</i></span>
+                    <CreateAddressField
+                      value={createTokenB}
+                      tokens={createTokenCatalog}
+                      balances={createTokenBalances}
+                      excludeAddress={createTokenAAddress}
+                      open={createPicker === 'b'}
+                      onOpenChange={(next) => setCreatePicker(next ? 'b' : null)}
+                      onChange={(value) => { setCreateTokenB(value); setActionError(null); }}
+                    />
+                    <small>{createTokenB && createTokenBAddress === null ? 'Not a valid 20-byte address.' : 'Any deployed ERC20.'}</small>
+                  </label>
+                </div>
 
                 <div className="dx-field__top"><b>수수료 등급</b><i>유동성 공급으로 얻는 금액입니다.</i></div>
                 <div className="dx-fee-picker" role="group" aria-label="LP fee tier">

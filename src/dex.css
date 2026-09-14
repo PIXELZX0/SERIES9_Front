@@ -539,6 +539,7 @@ summary:focus-visible {
 }
 
 .dx-panel {
+  min-width: 0;
   padding: 13px 15px 12px;
   border: 1px solid var(--line);
   border-radius: 0;

@@ -399,7 +399,6 @@ summary:focus-visible {
   gap: 4px;
   min-width: 0;
   padding: 18px;
-  border: 1px solid var(--line);
   background: var(--surface-2);
 }
 
@@ -417,7 +416,6 @@ summary:focus-visible {
 .dx-price-chart {
   min-width: 0;
   padding: 18px;
-  border: 1px solid var(--line);
   background: var(--surface-2);
 }
 

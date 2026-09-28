@@ -28,7 +28,7 @@ import {
 } from './chain.ts';
 import { useWallet } from './useWallet.ts';
 import { useAccount, useProtocol, type AccountStats, type ProtocolStats } from './useProtocol.ts';
-import DexPage from './DexPage.tsx';
+import DexPage from './dex/DexPage.tsx';
 
 type IconName = 'arrow' | 'bolt' | 'card' | 'check' | 'copy' | 'cubes' | 'diamond' | 'lock' | 'menu' | 'orbit' | 'qr' | 'wallet';
 type SectionId = 'overview' | 'identity' | 'staking' | 'tokenomics' | 'dex' | 'moderator' | 'pulse';

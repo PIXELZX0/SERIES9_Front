@@ -1,10 +1,9 @@
 /**
  * Minimal keccak-256 over 32-bit lanes.
  *
- * The DEX registry keys every pair by `keccak256(abi.encodePacked(token0, token1))`
- * with the two addresses sorted ascending, so the client needs a hash to look up
- * pools from a token pair. That is the only reason this exists: no crypto library
- * is worth the bundle for one 136-byte-rate sponge.
+ * The DEX layer derives its function and error selectors from Solidity
+ * signatures (`dex/abi.ts`). No crypto library is worth the bundle for one
+ * 136-byte-rate sponge.
  */
 
 const ROUND_CONSTANTS: Array<[number, number]> = [
@@ -20,7 +19,6 @@ const ROUND_CONSTANTS: Array<[number, number]> = [
 const ROTATIONS = [0, 1, 190, 28, 91, 36, 300, 6, 55, 276, 3, 10, 171, 153, 231, 105, 45, 15, 21, 136, 210, 66, 253, 120, 78];
 
 const RATE_BYTES = 136;
-const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
 function rotateLeft(high: number, low: number, rawShift: number): [number, number] {
   const shift = rawShift % 64;
@@ -130,28 +128,4 @@ function hexToBytes(hex: string): Uint8Array {
 export function keccak256Hex(hex: string): string {
   const digest = keccak256(hexToBytes(hex));
   return `0x${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
-/**
- * `keccak256(abi.encodePacked(token0, token1))` with the pair sorted ascending,
- * matching `DexRegistry`'s on-chain pair key.
- */
-export function computePairId(tokenA: string, tokenB: string): string | null {
-  if (!ADDRESS_PATTERN.test(tokenA) || !ADDRESS_PATTERN.test(tokenB)) return null;
-
-  const left = tokenA.slice(2).toLowerCase();
-  const right = tokenB.slice(2).toLowerCase();
-  if (left === right) return null;
-
-  const [token0, token1] = left < right ? [left, right] : [right, left];
-  return keccak256Hex(token0 + token1);
-}
-
-/** The order `SpotPool` stores its two tokens in, so the UI can label amounts before a pool exists. */
-export function sortTokenPair(tokenA: string, tokenB: string): [string, string] | null {
-  if (!ADDRESS_PATTERN.test(tokenA) || !ADDRESS_PATTERN.test(tokenB)) return null;
-  const left = tokenA.toLowerCase();
-  const right = tokenB.toLowerCase();
-  if (left === right) return null;
-  return left < right ? [left, right] : [right, left];
 }
